@@ -9,9 +9,21 @@
 <body>
 <div class="page-wrapper">
 
-  <!-- LOGIN (unchanged) ... -->
+  <!-- ============== LOGIN PAGE ============== -->
+  <div id="loginPage" class="login-body" style="display:flex;">
+    <div class="login-container">
+      <h2>AI-Driven LED Board System</h2>
+      <input id="user" type="text" placeholder="Username" autocomplete="username"/>
+      <input id="pass" type="password" placeholder="Password" autocomplete="current-password"/>
+      <button onclick="doLogin()">Login</button>
+      <p class="note">For demo: use any username & password</p>
+    </div>
+  </div>
 
+  <!-- ============== APP (DASHBOARD/ANALYTICS/SCENARIOS/LOGS) ============== -->
   <div id="dashboardPage" style="display:none;">
+
+    <!-- NAVBAR -->
     <header>
       <div class="header-container">
         <div class="logo"><img src="images/Adamson.png" alt="Logo"></div>
@@ -26,7 +38,7 @@
       </div>
     </header>
 
-    <!-- DASHBOARD -->
+    <!-- ============== DASHBOARD ============== -->
     <section id="dashboard" class="container active">
       <h2>📡 Live Monitoring — Adamson University San Marcelino St.</h2>
 
@@ -35,10 +47,12 @@
           <h3>Pedestrian Camera</h3>
           <div class="camera-feed"><img id="camPed" alt="Pedestrian Camera" loading="eager"></div>
         </div>
+
         <div class="card">
           <h3>Vehicle Camera</h3>
           <div class="camera-feed"><img id="camVeh" alt="Vehicle Camera" loading="eager"></div>
         </div>
+
         <div class="card">
           <h3>Traffic Light Detector</h3>
           <div class="camera-feed"><img id="camTL" alt="Traffic Light Camera" loading="eager"></div>
@@ -58,9 +72,9 @@
           <h3>Scenario Program</h3>
           <p><strong>Program:</strong> <span id="programLabel">AUTO</span></p>
           <div id="scenarioPills" style="display:flex;gap:10px;flex-wrap:wrap;margin:.5rem 0;">
-            <span class="status-text" id="pillVehicle">Vehicle Priority</span>
-            <span class="status-text" id="pillPed">Pedestrian Priority</span>
-            <span class="status-text" id="pillEmergency">Emergency Vehicle</span>
+            <span class="status-text offline" id="pillVehicle">Vehicle Priority</span>
+            <span class="status-text offline" id="pillPed">Pedestrian Priority</span>
+            <span class="status-text offline" id="pillEmergency">Emergency Vehicle</span>
           </div>
           <div style="margin-top:.5rem;">
             <strong>Current Light:</strong> <span id="curLight" class="light">—</span>
@@ -75,11 +89,71 @@
       </div>
     </section>
 
-    <!-- ANALYTICS (unchanged except your existing code that fetches /api/analytics) -->
+    <!-- ============== ANALYTICS ============== -->
+    <section id="analytics" class="container">
+      <h2>📊 Analytics</h2>
 
-    <!-- SCENARIOS page (purely informational now) -->
+      <div class="grid-2">
+        <div class="card" style="height:360px;">
+          <h3>Vehicle & Pedestrian Density (last 10 minutes)</h3>
+          <canvas id="densityChart"></canvas>
+        </div>
+        <div class="card" style="height:360px;">
+          <h3>Decision Breakdown (GO/STOP/OFF)</h3>
+          <canvas id="decisionChart"></canvas>
+        </div>
+      </div>
+    </section>
 
-    <!-- LOGS -->
+    <!-- ============== SCENARIOS ============== -->
+    <section id="scenarios" class="container">
+      <h2>🚦 Scenarios</h2>
+      <p id="scnBanner"><strong>LED Board:</strong> <span>—</span></p>
+
+      <div class="card scenario-card">
+        <div class="scenario-header">
+          <h3>Vehicle Priority</h3>
+          <div class="status-control"><span class="status-text active">Active</span></div>
+        </div>
+        <ul>
+          <li><strong>Pedestrian Camera:</strong> 5–10 students waiting</li>
+          <li><strong>Vehicle Camera:</strong> Heavy traffic 20+ Vehicles</li>
+          <li><strong>Traffic Light:</strong> Red</li>
+        </ul>
+        <p><strong>YOLOv8 Action:</strong> Vehicles priority to ease congestion.<br>
+        LED: <em>“Vehicles Priority – Wait to Cross”</em></p>
+      </div>
+
+      <div class="card scenario-card">
+        <div class="scenario-header">
+          <h3>Pedestrian Priority</h3>
+          <div class="status-control"><span class="status-text active">Active</span></div>
+        </div>
+        <ul>
+          <li><strong>Pedestrian Camera:</strong> 30+ waiting</li>
+          <li><strong>Vehicle Camera:</strong> 0–5 Vehicles</li>
+          <li><strong>Traffic Light:</strong> Green</li>
+        </ul>
+        <p><strong>YOLOv8 Action:</strong> Prioritize pedestrians (high density, low vehicles).<br>
+        LED: <em>“Prepare to Stop – Pedestrians Crossing”</em></p>
+      </div>
+
+      <div class="card scenario-card">
+        <div class="scenario-header">
+          <h3>Emergency Vehicle Detected</h3>
+          <div class="status-control"><span class="status-text active">Active</span></div>
+        </div>
+        <ul>
+          <li><strong>Pedestrian Camera:</strong> ~20 waiting</li>
+          <li><strong>Vehicle Camera:</strong> Ambulance with siren</li>
+          <li><strong>Traffic Light:</strong> Yellow → Red</li>
+        </ul>
+        <p><strong>YOLOv8 Action:</strong> Override for ambulance right-of-way.<br>
+        LED: <em>“Emergency Vehicle Passing – Please Wait”</em></p>
+      </div>
+    </section>
+
+    <!-- ============== LOGS ============== -->
     <section id="logs" class="container">
       <h2>🗄️ System Logs</h2>
       <div style="margin-bottom:10px;">
@@ -93,35 +167,71 @@
       </div>
     </section>
 
-    <footer><p>© 2025 Adamson University | AI-Driven LED Board Optimization</p></footer>
+    <footer>
+      <p>© 2025 Adamson University | AI-Driven LED Board Optimization</p>
+    </footer>
   </div>
 </div>
 
+<!-- libs -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-<script>
-const BASE_URL = location.origin.replace(/\/$/, '');
-const socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
 
-// Streams
+<script>
+// ================== CONFIG / LOGIN ==================
+const BASE_URL = location.origin.replace(/\/$/, '');
+function doLogin(){
+  if (!user.value || !pass.value) { alert("Enter any username and password for demo"); return; }
+  localStorage.setItem("loggedInUser", user.value.trim());
+  showDashboard();
+}
+function logout(){
+  localStorage.removeItem("loggedInUser");
+  localStorage.removeItem("activeTab");
+  showLogin();
+}
+function showDashboard(){
+  loginPage.style.display = "none";
+  dashboardPage.style.display = "block";
+  setCamSrcs();
+  openTab(localStorage.getItem("activeTab") || "dashboard");
+}
+function showLogin(){
+  loginPage.style.display = "flex";
+  dashboardPage.style.display = "none";
+}
+window.addEventListener("load", () => {
+  if (localStorage.getItem("loggedInUser")) showDashboard();
+  else showLogin();
+});
+
+// ================== TAB / STREAMS ==================
+function openTab(id){
+  document.querySelectorAll('.container').forEach(s=>s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  document.querySelectorAll('header nav a').forEach(a => {
+    a.classList.toggle('active', a.getAttribute('data-tab') === id);
+  });
+  localStorage.setItem("activeTab", id);
+  if (id === "logs") loadArchive();
+  if (id === "analytics") loadAnalytics();
+}
 function setCamSrcs(){
   camPed.src = BASE_URL + "/stream/ped";
   camVeh.src = BASE_URL + "/stream/veh";
   camTL.src  = BASE_URL + "/stream/tl";
 }
-window.addEventListener("load", setCamSrcs);
 
-// Heartbeat → ONLINE/OFFLINE
+// ================== SOCKET / STATUS ==================
+const socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
 let lastStatusTs = 0;
 setInterval(() => {
-  const now = Date.now();
-  const online = (now - lastStatusTs) < 5000;
+  const online = (Date.now() - lastStatusTs) < 5000;
   sysStatus.textContent = online ? "ONLINE" : "OFFLINE";
   sysStatus.classList.toggle("active", online);
   sysStatus.classList.toggle("offline", !online);
 }, 800);
 
-// scenario pill helper
 function highlightScenario(key){
   const isVeh = key === "scenario_2_rush_hold";
   const isPed = key === "scenario_1_night_ped";
@@ -133,33 +243,24 @@ function highlightScenario(key){
   pillEmergency.classList.toggle("active", isEm);
   pillEmergency.classList.toggle("offline", !isEm);
 }
-
-// status stream
 socket.on("status", s => {
   lastStatusTs = Date.now();
-  // decision line
   curDecision.textContent = `${s.action || '—'} ${s.scenario ? '('+s.scenario+')' : ''}`;
-  // metrics
   const kmh = (Number(s.avg_vehicle_speed_mps)||0) * 3.6;
   metricLine.textContent =
     `TL: ${(s.tl_color||'—').toUpperCase()} | 🧍 ${s.ped_count||0} | 🚗 ${s.veh_count||0} | Nearest: ${Number(s.nearest_vehicle_distance_m||0).toFixed(1)} m | Speed: ${Number(s.avg_vehicle_speed_mps||0).toFixed(1)} m/s (${kmh.toFixed(0)} km/h)`;
-  // current light pill
   curLight.className = 'light ' + (s.tl_color||'');
   curLight.textContent = (s.tl_color||'—').toUpperCase();
-  // scenario program label (from server)
   if (s.program_mode) programLabel.textContent = s.program_mode.toUpperCase();
-  // highlight current scenario
   highlightScenario(s.scenario || 'baseline');
 });
-
-// program override push
 socket.on("scenario_mode", payload => {
   if (payload?.mode) programLabel.textContent = payload.mode.toUpperCase();
 });
 
-// set program (calls API)
+// ================== PROGRAM OVERRIDE ==================
 async function setProgram(mode){
-  try {
+  try{
     const res = await fetch(BASE_URL + "/api/scenario_mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -167,38 +268,71 @@ async function setProgram(mode){
     });
     const data = await res.json();
     if (!data.ok) alert("Failed: " + (data.msg || ''));
-  } catch (e) { console.error(e); }
+  }catch(e){ console.error(e); }
 }
 
-// Archive helpers
+// ================== ANALYTICS ==================
+let densityChart, decisionChart, chartsLoaded=false;
+async function loadAnalytics(){
+  if (chartsLoaded) return;
+  try{
+    const res = await fetch(BASE_URL + "/api/analytics");
+    const rows = await res.json();
+
+    const labels = rows.map(r => r.minute);
+    const ped = rows.map(r => r.avg_ped);
+    const veh = rows.map(r => r.avg_veh);
+    const go  = rows.map(r => r.go);
+    const stop= rows.map(r => r.stop);
+    const off = rows.map(r => r.off);
+
+    densityChart = new Chart(document.getElementById('densityChart'), {
+      type: 'bar',
+      data: { labels, datasets: [
+        { label:'Avg Pedestrians', data: ped },
+        { label:'Avg Vehicles', data: veh },
+      ]},
+      options: { responsive:true, maintainAspectRatio:false }
+    });
+
+    decisionChart = new Chart(document.getElementById('decisionChart'), {
+      type: 'line',
+      data: { labels, datasets: [
+        { label:'GO', data: go },
+        { label:'STOP', data: stop },
+        { label:'OFF', data: off },
+      ]},
+      options: { responsive:true, maintainAspectRatio:false }
+    });
+
+    chartsLoaded = true;
+  }catch(e){ console.error("Analytics load failed:", e); }
+}
+
+// ================== ARCHIVE ==================
 async function loadArchive(limit=200){
-  const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
-  const rows = await res.json();
-  const tbody = document.querySelector("#logs tbody");
-  tbody.innerHTML = "";
-  // server already returns newest-first; if not, reverse here
-  rows.forEach(r => {
-    const tr = document.createElement("tr");
-    const t = new Date(r.ts * 1000).toLocaleTimeString();
-    tr.innerHTML = `<td>${t}</td>
-                    <td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td>
-                    <td>${r.action}</td>`;
-    tbody.appendChild(tr);
-  });
+  try{
+    const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
+    const rows = await res.json();
+    const tbody = document.querySelector("#logs tbody");
+    tbody.innerHTML = "";
+    rows.forEach(r => {
+      const tr = document.createElement("tr");
+      const t = new Date(r.ts * 1000).toLocaleTimeString();
+      tr.innerHTML = `<td>${t}</td>
+                      <td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td>
+                      <td>${r.action}</td>`;
+      tbody.appendChild(tr);
+    });
+  }catch(e){ console.error("Archive load failed:", e); }
 }
 async function clearLogs(){
   if (!confirm("Clear all logs?")) return;
-  const res = await fetch(BASE_URL + "/api/logs/clear", { method: "POST" });
-  const data = await res.json();
-  if (data.ok) loadArchive();
-  else alert("Failed to clear logs");
-}
-
-// tabs (minimal)
-function openTab(id){
-  document.querySelectorAll('.container').forEach(s=>s.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  if (id==="logs") loadArchive();
+  try{
+    const res = await fetch(BASE_URL + "/api/logs/clear", { method:"POST" });
+    const data = await res.json();
+    if (data.ok) loadArchive(); else alert("Failed to clear logs");
+  }catch(e){ console.error(e); }
 }
 </script>
 </body>
