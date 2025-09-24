@@ -46,6 +46,9 @@ latest_status = {
     "board_ped_l": "OFF",
     "board_ped_r": "OFF",
 }
+# --- Scenario Program Override ---
+# One of: "auto", "vehicle", "pedestrian", "emergency"
+SCENARIO_MODE = "auto"
 
 _state_lock = threading.Lock()
 
@@ -81,14 +84,31 @@ def api_health():
 # --------------------- SCENARIO ---------------------
 def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
                     tl_color: str, flags: Dict[str, bool]) -> Tuple[str, str]:
-    # emergency flag always overrides
+    """
+    Returns (action, scenario_key)
+
+    scenario_key is one of:
+      - "scenario_1_night_ped"  -> show as "Pedestrian Priority"
+      - "scenario_2_rush_hold"  -> show as "Vehicle Priority"
+      - "scenario_3_emergency"  -> show as "Emergency Vehicle"
+      - "baseline"               -> default/fallback
+    """
+    # Honor manual override first
+    if SCENARIO_MODE == "vehicle":
+        return ("OFF", "scenario_2_rush_hold")
+    if SCENARIO_MODE == "pedestrian":
+        return ("STOP" if tl_color in ("yellow", "red") else "GO", "scenario_1_night_ped")
+    if SCENARIO_MODE == "emergency":
+        return ("GO", "scenario_3_emergency")
+
+    # Auto mode (existing rules)
     if flags.get("ambulance", False):
-        return ("STOP", "scenario_3_emergency")
-    # simple demo heuristics
+        return ("GO", "scenario_3_emergency")
     if flags.get("night", False) and ped_count >= 30 and veh_count <= 2 and tl_color == "green":
         return ("STOP", "scenario_1_night_ped")
     if flags.get("rush", False) and (5 <= ped_count <= 10) and veh_count >= 20 and tl_color == "red":
         return ("OFF", "scenario_2_rush_hold")
+
     # baseline
     action = "OFF"
     if tl_color == "red":
@@ -106,6 +126,7 @@ def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
         elif ped_count > 0:
             action = "GO"
     return (action, "baseline")
+
 
 # --------------------- MJPEG STREAMING (uses cached JPEGs) ---------------------
 def mjpeg_stream(key: str):
