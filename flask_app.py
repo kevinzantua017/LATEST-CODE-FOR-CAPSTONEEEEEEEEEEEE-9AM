@@ -309,7 +309,7 @@ def api_set_scenario_mode():
     return jsonify({"ok": True, "mode": SCENARIO_MODE})
 
 @app.post("/api/logs/clear")
-def api_logs_clear():
+def api_logs_clear_v2():   # <-- just change the function name
     try:
         conn = _db_connect()
         conn.execute("DELETE FROM events;")
