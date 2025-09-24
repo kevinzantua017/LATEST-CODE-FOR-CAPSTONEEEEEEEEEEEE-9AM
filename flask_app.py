@@ -5,7 +5,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 import cv2
 import numpy as np
@@ -41,6 +41,7 @@ latest_status = {
     "avg_vehicle_speed_mps": 0.0,
     "action": "OFF",
     "scenario": "baseline",
+    # still tracked, but not shown as badges anymore
     "board_veh": "OFF",
     "board_ped_l": "OFF",
     "board_ped_r": "OFF",
@@ -62,7 +63,6 @@ def favicon():
     path = os.path.join(app.static_folder, "favicon.ico")
     if os.path.exists(path):
         return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/vnd.microsoft.icon")
-    # fallback to logo if present
     png = os.path.join(app.static_folder, "images", "Adamson.png")
     if os.path.exists(png):
         return send_from_directory(os.path.dirname(png), "Adamson.png", mimetype="image/png")
@@ -162,10 +162,9 @@ def api_status_now():
 @app.get("/api/logs")
 def api_logs():
     limit = int(request.args.get("limit", 100))
-    # newest first (DESC) so the UI can render descending without reversing
     rows = _safe_query_rows(
         """
-        SELECT ts, ped_count, veh_count, tl_color,
+        SELECT id, ts, ped_count, veh_count, tl_color,
                nearest_vehicle_distance_m, avg_vehicle_speed_mps, action
         FROM events
         ORDER BY id DESC
@@ -173,19 +172,23 @@ def api_logs():
         """,
         (limit,),
     )
+    with _state_lock:
+        bveh = latest_status.get("board_veh", "OFF")
+        pl   = latest_status.get("board_ped_l", "OFF")
+        pr   = latest_status.get("board_ped_r", "OFF")
     return jsonify([
         {
-            "ts": float(r[0]),
-            "ped_count": int(r[1]),
-            "veh_count": int(r[2]),
-            "tl_color": str(r[3]),
-            "nearest_vehicle_distance_m": float(r[4]),
-            "avg_vehicle_speed_mps": float(r[5]),
-            "action": str(r[6]),
-            # boards are live-only; include blanks for UI fallbacks
-            "board_veh": latest_status.get("board_veh", "OFF"),
-            "board_ped_l": latest_status.get("board_ped_l", "OFF"),
-            "board_ped_r": latest_status.get("board_ped_r", "OFF"),
+            "id": int(r[0]),
+            "ts": float(r[1]),
+            "ped_count": int(r[2]),
+            "veh_count": int(r[3]),
+            "tl_color": str(r[4]),
+            "nearest_vehicle_distance_m": float(r[5]),
+            "avg_vehicle_speed_mps": float(r[6]),
+            "action": str(r[7]),
+            "board_veh": bveh,
+            "board_ped_l": pl,
+            "board_ped_r": pr,
         }
         for r in rows
     ])
@@ -232,9 +235,42 @@ def api_set_scenario():
             if v in ("ON","OFF"):
                 board_state[k] = v
                 latest_status[k] = v
-    # broadcast new status so dashboards update immediately
     socketio.emit("status", latest_status, namespace="/realtime")
     return jsonify({"ok": True, "state": {**board_state}})
+
+# ---- Archive management ----
+@app.post("/api/logs/delete")
+def api_logs_delete():
+    data = request.get_json(silent=True) or {}
+    ids: List[int] = data.get("ids") or []
+    if not ids:
+        return jsonify({"ok": False, "msg": "no ids"}), 400
+    placeholders = ",".join("?" for _ in ids)
+    conn = _db_connect()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "deleted": int(deleted)})
+
+@app.post("/api/logs/clear")
+def api_logs_clear():
+    data = request.get_json(silent=True) or {}
+    all_flag = bool(data.get("all"))
+    older_than = data.get("older_than_seconds")  # optional
+    conn = _db_connect()
+    cur = conn.cursor()
+    if all_flag:
+        cur.execute("DELETE FROM events")
+    elif older_than is not None:
+        cur.execute("DELETE FROM events WHERE ts < strftime('%s','now') - ?", (int(older_than),))
+    else:
+        return jsonify({"ok": False, "msg": "provide {all:true} or older_than_seconds"}), 400
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "deleted": int(deleted)})
 
 # --------------------- realtime emits ---------------------
 def tail_db_emit():
@@ -275,7 +311,6 @@ def tail_db_emit():
 
 # --------------------- HOOKS (called by app.py) ---------------------
 def publish_frame(cam_key: str, frame: np.ndarray):
-    # cache raw frame (optional) + a single JPEG encode shared by all clients
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
     with _state_lock:
         latest_frames[cam_key] = frame
@@ -284,15 +319,12 @@ def publish_frame(cam_key: str, frame: np.ndarray):
 def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
                              tl_color: str, nearest_m: float, avg_mps: float,
                              flags: Dict[str, bool], extra: Dict[str, bool]):
-    # Compute default action/scenario
     action, scenario = decide_scenario(now_ts, ped_count, veh_count, tl_color, {
         "night": flags.get("night", False),
         "rush": flags.get("rush", False),
         "ambulance": extra.get("ambulance", False),
     })
-    # If UI selected a non-baseline scenario, advertise it (does not override action)
     scenario_to_show = board_state.get("scenario", "baseline") or "baseline"
-
     with _state_lock:
         latest_status.update({
             "ts": float(now_ts),
@@ -303,7 +335,6 @@ def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
             "avg_vehicle_speed_mps": float(avg_mps),
             "action": action,
             "scenario": scenario_to_show if scenario_to_show != "baseline" else scenario,
-            # include board flags so Dashboard can show them
             "board_veh": board_state["board_veh"],
             "board_ped_l": board_state["board_ped_l"],
             "board_ped_r": board_state["board_ped_r"],
@@ -313,7 +344,7 @@ def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
 # --------------------- MAIN ---------------------
 def start_http_server(host="0.0.0.0", port=5000):
     print(f"[flask_app] Starting Flask-SocketIO on http://{host}:{port} ...")
-    socketio.start_background_task(tail_db_emit)  # optional tailer
+    socketio.start_background_task(tail_db_emit)
     socketio.run(app, host=host, port=port, debug=False)
 
 if __name__ == "__main__":
