@@ -29,6 +29,10 @@ latest_status = {
     "action": "OFF",
     "scenario": None,
     "online": False,
+    # computed board states
+    "board_veh": "OFF",
+    "board_ped_l": "OFF",
+    "board_ped_r": "OFF",
 }
 
 _state_lock = threading.Lock()
@@ -50,6 +54,7 @@ def api_health():
     except Exception as e:
         return jsonify({"ok": False, "msg": repr(e)}), 500
 
+# ---------------- SCENARIO ----------------
 def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
                     tl_color: str, flags: Dict[str, bool]) -> Tuple[str, str]:
     if flags.get("ambulance", False):
@@ -58,6 +63,7 @@ def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
         return ("STOP", "scenario_1_night_ped")
     if flags.get("rush", False) and (5 <= ped_count <= 10) and veh_count >= 20 and tl_color == "red":
         return ("OFF", "scenario_2_rush_hold")
+    # baseline
     action = "OFF"
     if tl_color == "red":
         action = "STOP"
@@ -75,6 +81,18 @@ def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
             action = "GO"
     return (action, "baseline")
 
+def derive_board_states(action: str, tl_color: str) -> Tuple[str, str, str]:
+    """
+    Map the overall pedestrian-facing action + TL to three board states:
+      - Vehicle LED: STOP if TL is red/yellow or pedestrians should GO; otherwise GO if green; else OFF
+      - Ped LEDs (Left/Right): same as pedestrian action
+    """
+    veh = "STOP" if (tl_color in ("red", "yellow") or action == "STOP" or action == "GO") else ("GO" if tl_color == "green" else "OFF")
+    ped_l = action or "OFF"
+    ped_r = action or "OFF"
+    return veh, ped_l, ped_r
+
+# ------------- STREAM -------------
 def mjpeg_stream(key: str):
     boundary = b"--frame"
     header   = b"Content-Type: image/jpeg\r\nCache-Control: no-cache\r\n\r\n"
@@ -89,10 +107,11 @@ def mjpeg_stream(key: str):
 
 @app.get("/stream/<cam>")
 def stream_cam(cam: str):
-    if cam not in ("ped","veh","tl"):
+    if cam not in ("ped", "veh", "tl"):
         return "unknown cam", 404
     return Response(mjpeg_stream(cam), mimetype="multipart/x-mixed-replace; boundary=frame")
 
+# ------------- DB -------------
 def _db_connect():
     conn = sqlite3.connect(DB_PATH, timeout=3.0, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -113,6 +132,7 @@ def _safe_query_rows(sql: str, args=()):
             return []
         raise
 
+# ------------- REST -------------
 @app.get("/api/status")
 def api_status():
     with _state_lock:
@@ -120,6 +140,9 @@ def api_status():
 
 @app.get("/api/logs")
 def api_logs():
+    """
+    Latest first (descending) + include computed board statuses per row.
+    """
     limit = int(request.args.get("limit", 100))
     rows = _safe_query_rows(
         """
@@ -131,21 +154,30 @@ def api_logs():
         """,
         (limit,),
     )
-    return jsonify([
-        {
+    out = []
+    for r in rows:
+        tl = str(r[3])
+        act = str(r[6])
+        veh_b, ped_l_b, ped_r_b = derive_board_states(act, tl)
+        out.append({
             "ts": float(r[0]),
             "ped_count": int(r[1]),
             "veh_count": int(r[2]),
-            "tl_color": str(r[3]),
+            "tl_color": tl,
             "nearest_vehicle_distance_m": float(r[4]),
             "avg_vehicle_speed_mps": float(r[5]),
-            "action": str(r[6]),
-        }
-        for r in rows
-    ])
+            "action": act,                 # legacy (ped action)
+            "board_veh": veh_b,
+            "board_ped_l": ped_l_b,
+            "board_ped_r": ped_r_b,
+        })
+    return jsonify(out)
 
 @app.get("/api/analytics")
 def api_analytics():
+    """
+    Return 1 row per minute (last 10 minutes).
+    """
     rows = _safe_query_rows(
         """
         SELECT strftime('%Y-%m-%d %H:%M', ts, 'unixepoch') AS minute,
@@ -161,17 +193,12 @@ def api_analytics():
         """
     )
     return jsonify([
-        {
-            "minute": m,
-            "avg_ped": float(p or 0),
-            "avg_veh": float(v or 0),
-            "go": int(go or 0),
-            "stop": int(st or 0),
-            "off": int(off or 0),
-        }
+        {"minute": m, "avg_ped": float(p or 0), "avg_veh": float(v or 0),
+         "go": int(go or 0), "stop": int(st or 0), "off": int(off or 0)}
         for (m, p, v, go, st, off) in rows
     ])
 
+# ------------- realtime emitter -------------
 def tail_db_emit():
     print("[flask_app] DB tailer started")
     last_id = 0
@@ -189,22 +216,31 @@ def tail_db_emit():
                 row = rows[0]
                 if row[0] != last_id:
                     last_id = row[0]
-                    payload = {
-                        "ts": float(row[1]),
-                        "ped_count": int(row[2]),
-                        "veh_count": int(row[3]),
-                        "tl_color": str(row[4]),
-                        "nearest_vehicle_distance_m": float(row[5]),
-                        "avg_vehicle_speed_mps": float(row[6]),
-                        "action": str(row[7]),
-                        "online": latest_status.get("online", False),
-                    }
+                    with _state_lock:
+                        tl = str(row[4])
+                        act = str(row[7])
+                        veh_b, ped_l_b, ped_r_b = derive_board_states(act, tl)
+                        payload = {
+                            "ts": float(row[1]),
+                            "ped_count": int(row[2]),
+                            "veh_count": int(row[3]),
+                            "tl_color": tl,
+                            "nearest_vehicle_distance_m": float(row[5]),
+                            "avg_vehicle_speed_mps": float(row[6]),
+                            "action": act,
+                            "online": latest_status.get("online", False),
+                            "board_veh": veh_b,
+                            "board_ped_l": ped_l_b,
+                            "board_ped_r": ped_r_b,
+                            "scenario": latest_status.get("scenario", "baseline"),
+                        }
                     socketio.emit("status", payload, namespace="/realtime")
                     socketio.emit("log_insert", payload, namespace="/realtime")
         except Exception as e:
             print("[flask_app] tailer error:", repr(e))
         socketio.sleep(DB_TAIL_INTERVAL_S)
 
+# ------------- hooks from app.py -------------
 def publish_frame(cam_key: str, frame: np.ndarray):
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
     with _state_lock:
@@ -219,6 +255,7 @@ def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
         "rush": flags.get("rush", False),
         "ambulance": extra.get("ambulance", False),
     })
+    veh_b, ped_l_b, ped_r_b = derive_board_states(action, tl_color)
     with _state_lock:
         latest_status.update({
             "ts": float(now_ts),
@@ -230,6 +267,9 @@ def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
             "action": action,
             "scenario": scenario,
             "online": bool(online),
+            "board_veh": veh_b,
+            "board_ped_l": ped_l_b,
+            "board_ped_r": ped_r_b,
         })
     socketio.emit("status", latest_status, namespace="/realtime")
 
