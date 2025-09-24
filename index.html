@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AI-Driven LED Board Optimization</title>
   <link rel="stylesheet" href="style.css"/>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
 </head>
 <body>
 <div class="page-wrapper">
@@ -96,7 +97,7 @@
       </div>
     </section>
 
-    <!-- Scenarios (UI demo only) -->
+    <!-- Scenarios -->
     <section id="scenarios" class="container">
       <h2>🚦 Scenarios</h2>
       <p><strong>LED Board:</strong> <span id="scenarioMessage2">—</span></p>
@@ -242,73 +243,69 @@
     camTL.src  = BASE_URL + "/stream/tl";
   }
 
-  // ========= ONLINE/OFFLINE via SOCKET HEARTBEAT =========
+  // ========= ONLINE/OFFLINE via Socket.IO + poll fallback =========
   let lastStatusTs = 0;
+  const ONLINE_TIMEOUT_MS = 5000;
+
   function setSysOnline(online){
     const el = document.getElementById("sysOnline");
     el.textContent = online ? "ONLINE" : "OFFLINE";
     el.classList.toggle("active", online);
     el.classList.toggle("offline", !online);
   }
-  setInterval(()=>{ setSysOnline(Date.now() - lastStatusTs < 5000); }, 1000);
+  setInterval(()=>{ setSysOnline(Date.now() - lastStatusTs < ONLINE_TIMEOUT_MS); }, 1000);
 
-  // ========= SOCKET.IO (Realtime) =========
-  let socket = null;
-  try { socket = io(BASE_URL + "/realtime", { transports: ["websocket"] }); }
-  catch (e) { console.warn("Socket init failed:", e); }
+  function renderStatus(s){
+    lastStatusTs = Date.now();
 
-  function badge(el, text, on){
-    el.textContent = text;
-    el.classList.toggle("active", on);
-    el.classList.toggle("offline", !on);
-  }
-  function scenarioBanner(s){
-    const base = s.action === "GO" ? "Safe to Cross" :
-                 (s.action === "STOP" ? "Stop" : "Standby");
-    const map = {
+    // System strip
+    sysDecision.textContent = `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
+    sysLine.innerHTML =
+      `TL: ${(s.tl_color||'').toUpperCase()} | 🚶 ${s.ped_count} | 🚗 ${s.veh_count} | `+
+      `Nearest: ${Number(s.nearest_vehicle_distance_m).toFixed(1)} m | `+
+      `Speed: ${Number(s.avg_vehicle_speed_mps).toFixed(1)} m/s (`+
+      `${(Number(s.avg_vehicle_speed_mps)*3.6).toFixed(0)} km/h)`;
+
+    // Scenario text
+    const scenMap = {
       scenario_1_night_ped: "Prepare to Stop – Pedestrians Crossing",
       scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
       scenario_3_emergency: "Emergency Vehicle Passing – Please Wait",
-      baseline: base
+      baseline: (s.action === "GO" ? "Safe to Cross" : (s.action === "STOP" ? "Stop" : "Standby"))
     };
-    return map[s.scenario || "baseline"];
+    const scen = scenMap[s.scenario || "baseline"];
+    scenarioMessage.textContent = scen;
+    scenarioMessage2.textContent = scen;
+
+    // Light badge
+    lightBadge.className = 'light ' + (s.tl_color||'');
+    lightBadge.textContent = (s.tl_color||'').toUpperCase();
+
+    // Board badges
+    function badge(el, text, on){
+      el.textContent = text;
+      el.classList.toggle("active", on);
+      el.classList.toggle("offline", !on);
+    }
+    badge(boardVeh,  `Vehicle LED: ${s.board_veh||'OFF'}`,   (s.board_veh||'OFF')!=='OFF');
+    badge(boardPedL, `Ped LED (Left): ${s.board_ped_l||'OFF'}`, (s.board_ped_l||'OFF')!=='OFF');
+    badge(boardPedR, `Ped LED (Right): ${s.board_ped_r||'OFF'}`, (s.board_ped_r||'OFF')!=='OFF');
   }
 
-  if (socket){
-    socket.on("status", (s) => {
-      // heartbeat for ONLINE/OFFLINE
-      lastStatusTs = Date.now();
+  let socket = null;
+  try {
+    socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
+    socket.on("status", renderStatus);
+  } catch(e){ console.warn("Socket init failed:", e); }
 
-      // System strip
-      document.getElementById("sysDecision").textContent =
-        `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
-      document.getElementById("sysLine").innerHTML =
-        `TL: ${(s.tl_color||'').toUpperCase()} | 🚶 ${s.ped_count} | 🚗 ${s.veh_count} | `+
-        `Nearest: ${Number(s.nearest_vehicle_distance_m).toFixed(1)} m | `+
-        `Speed: ${Number(s.avg_vehicle_speed_mps).toFixed(1)} m/s (`+
-        `${(Number(s.avg_vehicle_speed_mps)*3.6).toFixed(0)} km/h)`;
-
-      // Scenario text
-      const scen = scenarioBanner(s);
-      document.getElementById("scenarioMessage").textContent = scen;
-      document.getElementById("scenarioMessage2").textContent = scen;
-
-      // Light badge
-      const lb = document.getElementById("lightBadge");
-      if (lb){
-        lb.className = 'light ' + (s.tl_color||'');
-        lb.textContent = (s.tl_color||'').toUpperCase();
-      }
-
-      // Board badges
-      badge(document.getElementById("boardVeh"),
-            `Vehicle LED: ${s.board_veh||'OFF'}`, (s.board_veh||'OFF')!=='OFF');
-      badge(document.getElementById("boardPedL"),
-            `Ped LED (Left): ${s.board_ped_l||'OFF'}`, (s.board_ped_l||'OFF')!=='OFF');
-      badge(document.getElementById("boardPedR"),
-            `Ped LED (Right): ${s.board_ped_r||'OFF'}`, (s.board_ped_r||'OFF')!=='OFF');
-    });
-  }
+  // Poll fallback every 2s (also helps if socket connects late)
+  setInterval(async ()=>{
+    try{
+      const r = await fetch(BASE_URL + "/api/status_now", {cache: "no-store"});
+      const s = await r.json();
+      renderStatus(s);
+    }catch(e){ /* network down */ }
+  }, 2000);
 
   // ========= ANALYTICS (minute buckets) =========
   async function loadAnalytics(){
@@ -392,12 +389,41 @@
     }
   }
 
-  // ========= Scenario toggle (UI only) =========
-  function toggleScenario(checkbox) {
+  // ========= Scenario toggle (calls backend) =========
+  async function toggleScenario(checkbox) {
     const statusText = checkbox.closest('.scenario-header').querySelector('.status-text');
-    if (!statusText) return;
-    if (checkbox.checked) { statusText.textContent="Active"; statusText.classList.remove("offline"); statusText.classList.add("active"); }
-    else { statusText.textContent="Offline"; statusText.classList.remove("active"); statusText.classList.add("offline"); }
+    const active = checkbox.checked;
+    statusText.textContent = active ? "Active" : "Offline";
+    statusText.classList.toggle("active", active);
+    statusText.classList.toggle("offline", !active);
+
+    const title = checkbox.closest('.scenario-card').querySelector('h3')?.textContent.trim().toLowerCase();
+
+    let payload = {};
+    if (title.includes("vehicle priority")) {
+      payload = { scenario: active ? "scenario_2_rush_hold" : "baseline",
+                  board_veh: active ? "ON" : "OFF" };
+    } else if (title.includes("pedestrian priority")) {
+      payload = { scenario: active ? "scenario_1_night_ped" : "baseline",
+                  board_ped_l: active ? "ON" : "OFF",
+                  board_ped_r: active ? "ON" : "OFF" };
+    } else if (title.includes("emergency")) {
+      payload = { scenario: active ? "scenario_3_emergency" : "baseline",
+                  board_veh: active ? "ON" : "OFF",
+                  board_ped_l: "OFF",
+                  board_ped_r: "OFF" };
+    }
+
+    try {
+      await fetch(BASE_URL + "/api/set_scenario", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      // server will broadcast an updated "status"
+    } catch(e) {
+      console.error("Failed to set scenario:", e);
+    }
   }
 </script>
 </body>
