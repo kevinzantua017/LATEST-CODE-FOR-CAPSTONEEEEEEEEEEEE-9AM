@@ -46,9 +46,6 @@ latest_status = {
     "board_ped_l": "OFF",
     "board_ped_r": "OFF",
 }
-# --- Scenario Program Override ---
-# One of: "auto", "vehicle", "pedestrian", "emergency"
-SCENARIO_MODE = "auto"
 
 _state_lock = threading.Lock()
 
@@ -84,31 +81,14 @@ def api_health():
 # --------------------- SCENARIO ---------------------
 def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
                     tl_color: str, flags: Dict[str, bool]) -> Tuple[str, str]:
-    """
-    Returns (action, scenario_key)
-
-    scenario_key is one of:
-      - "scenario_1_night_ped"  -> show as "Pedestrian Priority"
-      - "scenario_2_rush_hold"  -> show as "Vehicle Priority"
-      - "scenario_3_emergency"  -> show as "Emergency Vehicle"
-      - "baseline"               -> default/fallback
-    """
-    # Honor manual override first
-    if SCENARIO_MODE == "vehicle":
-        return ("OFF", "scenario_2_rush_hold")
-    if SCENARIO_MODE == "pedestrian":
-        return ("STOP" if tl_color in ("yellow", "red") else "GO", "scenario_1_night_ped")
-    if SCENARIO_MODE == "emergency":
-        return ("GO", "scenario_3_emergency")
-
-    # Auto mode (existing rules)
+    # emergency flag always overrides
     if flags.get("ambulance", False):
-        return ("GO", "scenario_3_emergency")
+        return ("STOP", "scenario_3_emergency")
+    # simple demo heuristics
     if flags.get("night", False) and ped_count >= 30 and veh_count <= 2 and tl_color == "green":
         return ("STOP", "scenario_1_night_ped")
     if flags.get("rush", False) and (5 <= ped_count <= 10) and veh_count >= 20 and tl_color == "red":
         return ("OFF", "scenario_2_rush_hold")
-
     # baseline
     action = "OFF"
     if tl_color == "red":
@@ -126,7 +106,6 @@ def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
         elif ped_count > 0:
             action = "GO"
     return (action, "baseline")
-
 
 # --------------------- MJPEG STREAMING (uses cached JPEGs) ---------------------
 def mjpeg_stream(key: str):
@@ -293,32 +272,6 @@ def api_logs_clear():
     conn.close()
     return jsonify({"ok": True, "deleted": int(deleted)})
 
-@app.get("/api/scenario_mode")
-def api_get_scenario_mode():
-    return jsonify({"mode": SCENARIO_MODE})
-
-@app.post("/api/scenario_mode")
-def api_set_scenario_mode():
-    global SCENARIO_MODE
-    mode = (request.json or {}).get("mode", "auto").lower()
-    if mode not in ("auto", "vehicle", "pedestrian", "emergency"):
-        return jsonify({"ok": False, "msg": "invalid mode"}), 400
-    SCENARIO_MODE = mode
-    # Broadcast so dashboards update immediately
-    socketio.emit("scenario_mode", {"mode": SCENARIO_MODE}, namespace="/realtime")
-    return jsonify({"ok": True, "mode": SCENARIO_MODE})
-
-@app.post("/api/logs/clear")
-def api_logs_clear_v2():   # <-- just change the function name
-    try:
-        conn = _db_connect()
-        conn.execute("DELETE FROM events;")
-        conn.commit()
-        conn.close()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "msg": repr(e)}), 500
-
 # --------------------- realtime emits ---------------------
 def tail_db_emit():
     print("[flask_app] DB tailer started")
@@ -371,6 +324,7 @@ def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
         "rush": flags.get("rush", False),
         "ambulance": extra.get("ambulance", False),
     })
+    scenario_to_show = board_state.get("scenario", "baseline") or "baseline"
     with _state_lock:
         latest_status.update({
             "ts": float(now_ts),
@@ -380,12 +334,12 @@ def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
             "nearest_vehicle_distance_m": float(nearest_m),
             "avg_vehicle_speed_mps": float(avg_mps),
             "action": action,
-            "scenario": scenario,
+            "scenario": scenario_to_show if scenario_to_show != "baseline" else scenario,
+            "board_veh": board_state["board_veh"],
+            "board_ped_l": board_state["board_ped_l"],
+            "board_ped_r": board_state["board_ped_r"],
         })
-    socketio.emit("status", {
-        **latest_status,
-        "program_mode": SCENARIO_MODE,   # <-- new
-    }, namespace="/realtime")
+    socketio.emit("status", latest_status, namespace="/realtime")
 
 # --------------------- MAIN ---------------------
 def start_http_server(host="0.0.0.0", port=5000):
