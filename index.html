@@ -9,7 +9,7 @@
 <body>
 <div class="page-wrapper">
 
-  <!-- LOGIN -->
+  <!-- ================= LOGIN PAGE ================= -->
   <div id="loginPage" class="login-body" style="display:flex;">
     <div class="login-container">
       <h2>AI-Driven LED Board System</h2>
@@ -20,8 +20,10 @@
     </div>
   </div>
 
-  <!-- DASHBOARD -->
+  <!-- ================= DASHBOARD PAGE ================= -->
   <div id="dashboardPage" style="display:none;">
+
+    <!-- Navbar -->
     <header>
       <div class="header-container">
         <div class="logo"><img src="images/Adamson.png" alt="Logo"></div>
@@ -36,6 +38,7 @@
       </div>
     </header>
 
+    <!-- Dashboard -->
     <section id="dashboard" class="container active">
       <h2>📡 Live Monitoring — Adamson University San Marcelino St.</h2>
 
@@ -44,10 +47,12 @@
           <h3>Pedestrian Camera</h3>
           <div class="camera-feed"><img id="camPed" alt="Pedestrian Camera" loading="eager"></div>
         </div>
+
         <div class="card">
           <h3>Vehicle Camera</h3>
           <div class="camera-feed"><img id="camVeh" alt="Vehicle Camera" loading="eager"></div>
         </div>
+
         <div class="card">
           <h3>Traffic Light Detector</h3>
           <div class="camera-feed"><img id="camTL" alt="Traffic Light Camera" loading="eager"></div>
@@ -55,14 +60,14 @@
       </div>
 
       <div class="grid-2" style="margin-top:1rem;">
-        <!-- Left: System Status -->
+        <!-- System Status -->
         <div class="card status" id="systemCard">
           <p><strong>System Status:</strong> <span id="sysOnline" class="status-text offline">OFFLINE</span></p>
           <p><strong>Current Decision:</strong> <span id="sysDecision">—</span></p>
           <p id="sysLine">TL: — | 🚶 0 | 🚗 0 | Nearest: 0.0 m | Speed: 0.0 m/s (0 km/h)</p>
         </div>
 
-        <!-- Right: Boards & Scenarios -->
+        <!-- Boards & Scenario -->
         <div class="card">
           <h3>Boards & Scenario</h3>
           <p>Scenario: <strong id="scenarioMessage">—</strong></p>
@@ -76,6 +81,7 @@
       </div>
     </section>
 
+    <!-- Analytics -->
     <section id="analytics" class="container">
       <h2>📊 Analytics</h2>
       <div class="grid-2">
@@ -90,6 +96,7 @@
       </div>
     </section>
 
+    <!-- Scenarios (UI demo only) -->
     <section id="scenarios" class="container">
       <h2>🚦 Scenarios</h2>
       <p><strong>LED Board:</strong> <span id="scenarioMessage2">—</span></p>
@@ -145,136 +152,177 @@
       </div>
     </section>
 
+    <!-- Logs -->
     <section id="logs" class="container">
       <h2>🗂️ System Logs</h2>
       <div class="table-scroll">
         <table>
           <thead>
-            <tr><th>Time</th><th>Event</th><th>Status (Boards)</th></tr>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Status (Boards)</th>
+            </tr>
           </thead>
           <tbody></tbody>
         </table>
       </div>
     </section>
 
-    <footer><p>© 2025 Adamson University | AI-Driven LED Board Optimization</p></footer>
-  </div>
-</div>
+    <!-- Footer -->
+    <footer>
+      <p>© 2025 Adamson University | AI-Driven LED Board Optimization</p>
+    </footer>
 
+  </div> <!-- /dashboardPage -->
+
+</div> <!-- /page-wrapper -->
+
+<!-- ================= JAVASCRIPT ================= -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
-  // ===== CONFIG =====
-  const BASE_URL = "http://172.20.10.3:5000";   // your Pi
+  // ========= CONFIG =========
+  const BASE_URL = "http://172.20.10.3:5000";   // Flask on the Pi
 
-  // socket (best-effort)
-  let socket = null;
-  try { socket = io(BASE_URL + "/realtime", { transports: ["websocket"] }); }
-  catch (e) { console.warn("Socket init failed:", e); }
+  // ========= LOGIN =========
+  function doLogin(){
+    const u = user.value.trim(), p = pass.value.trim();
+    if (!u || !p) { alert("Enter any username & password"); return; }
+    localStorage.setItem("loggedInUser", u);
+    showDashboard();
+  }
+  function logout(){
+    localStorage.removeItem("loggedInUser");
+    localStorage.removeItem("activeTab");
+    showLogin();
+  }
+  function showDashboard(){
+    loginPage.style.display = "none";
+    dashboardPage.style.display = "block";
+    setCamSrcs();
+    openTab(localStorage.getItem("activeTab") || "dashboard");
+  }
+  function showLogin(){
+    loginPage.style.display = "flex";
+    dashboardPage.style.display = "none";
+  }
+  window.addEventListener("load", () => {
+    if (localStorage.getItem("loggedInUser")) showDashboard();
+    else showLogin();
+  });
 
-  // ===== LOGIN =====
-  function doLogin(){ const u=user.value.trim(), p=pass.value.trim(); if(!u||!p){alert("Enter any username & password");return;} localStorage.setItem("loggedInUser",u); showDashboard(); }
-  function logout(){ localStorage.removeItem("loggedInUser"); localStorage.removeItem("activeTab"); showLogin(); }
-  function showDashboard(){ loginPage.style.display="none"; dashboardPage.style.display="block"; setCamSrcs(); openTab(localStorage.getItem("activeTab")||"dashboard"); }
-  function showLogin(){ loginPage.style.display="flex"; dashboardPage.style.display="none"; }
-  window.addEventListener("load", () => { if(localStorage.getItem("loggedInUser")) showDashboard(); else showLogin(); });
+  // ========= TABS =========
+  let densityChart, decisionChart, analyticsTimer=null, logsTimer=null;
+  function openTab(tabId) {
+    document.querySelectorAll('.container').forEach(s => s.classList.remove('active'));
+    document.getElementById(tabId)?.classList.add('active');
 
-  // ===== CAMERA STREAMS + Online heartbeat =====
-  function setCamSrcs(){
+    document.querySelectorAll('header nav a').forEach(a => {
+      a.classList.toggle('active', a.getAttribute('data-tab') === tabId);
+    });
+
+    localStorage.setItem("activeTab", tabId);
+
+    if (tabId === "analytics") {
+      loadAnalytics();
+      if (!analyticsTimer) analyticsTimer = setInterval(loadAnalytics, 60000); // 1 min
+    } else { if (analyticsTimer) { clearInterval(analyticsTimer); analyticsTimer = null; } }
+
+    if (tabId === "logs") {
+      loadArchive();  // initial load
+      if (!logsTimer) logsTimer = setInterval(loadArchive, 30000); // 30s
+    } else { if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } }
+  }
+
+  // ========= CAMERA STREAMS =========
+  function setCamSrcs() {
     camPed.src = BASE_URL + "/stream/ped";
     camVeh.src = BASE_URL + "/stream/veh";
     camTL.src  = BASE_URL + "/stream/tl";
   }
-  // simple camera "alive" heuristic: if any <img> loads in last 3s => ONLINE
-  let lastImgLoad = 0;
-  [camPed, camVeh, camTL].forEach(img=>{
-    img.addEventListener('load', ()=>{ lastImgLoad = Date.now(); setSysOnline(true); });
-    img.addEventListener('error', ()=>setSysOnline(false));
-  });
+
+  // ========= ONLINE/OFFLINE via SOCKET HEARTBEAT =========
+  let lastStatusTs = 0;
   function setSysOnline(online){
     const el = document.getElementById("sysOnline");
     el.textContent = online ? "ONLINE" : "OFFLINE";
     el.classList.toggle("active", online);
     el.classList.toggle("offline", !online);
   }
-  setInterval(()=>{ setSysOnline(Date.now()-lastImgLoad < 3000); }, 1000);
+  setInterval(()=>{ setSysOnline(Date.now() - lastStatusTs < 5000); }, 1000);
 
-  // ===== TABS =====
-  let densityChart, decisionChart, chartsLoaded=false, analyticsTimer=null, logsTimer=null;
-  function openTab(tabId){
-    document.querySelectorAll('.container').forEach(s=>s.classList.remove('active'));
-    document.getElementById(tabId)?.classList.add('active');
-    document.querySelectorAll('header nav a').forEach(a=>a.classList.toggle('active', a.getAttribute('data-tab')===tabId));
-    localStorage.setItem("activeTab", tabId);
+  // ========= SOCKET.IO (Realtime) =========
+  let socket = null;
+  try { socket = io(BASE_URL + "/realtime", { transports: ["websocket"] }); }
+  catch (e) { console.warn("Socket init failed:", e); }
 
-    if (tabId === "analytics") {
-      loadAnalytics();
-      if (!analyticsTimer) analyticsTimer = setInterval(loadAnalytics, 60000);   // every 1 min
-    } else { if (analyticsTimer){ clearInterval(analyticsTimer); analyticsTimer=null; } }
-
-    if (tabId === "logs") { loadArchive(); if (!logsTimer) logsTimer=setInterval(loadArchive, 30000); }
-    else { if (logsTimer){ clearInterval(logsTimer); logsTimer=null; } }
-  }
-
-  // ===== SOCKET UPDATES =====
   function badge(el, text, on){
     el.textContent = text;
     el.classList.toggle("active", on);
     el.classList.toggle("offline", !on);
   }
   function scenarioBanner(s){
-    const base = s.action === "GO" ? "Safe to Cross" : (s.action === "STOP" ? "Stop" : "Standby");
-    const map = { scenario_1_night_ped:"Prepare to Stop – Pedestrians Crossing", scenario_2_rush_hold:"Vehicles Priority – Wait to Cross", scenario_3_emergency:"Emergency Vehicle Passing – Please Wait", baseline: base };
+    const base = s.action === "GO" ? "Safe to Cross" :
+                 (s.action === "STOP" ? "Stop" : "Standby");
+    const map = {
+      scenario_1_night_ped: "Prepare to Stop – Pedestrians Crossing",
+      scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
+      scenario_3_emergency: "Emergency Vehicle Passing – Please Wait",
+      baseline: base
+    };
     return map[s.scenario || "baseline"];
   }
 
   if (socket){
     socket.on("status", (s) => {
-      // System card
-      setSysOnline(!!s.online);
-      document.getElementById("sysDecision").textContent = `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
+      // heartbeat for ONLINE/OFFLINE
+      lastStatusTs = Date.now();
+
+      // System strip
+      document.getElementById("sysDecision").textContent =
+        `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
       document.getElementById("sysLine").innerHTML =
-        `TL: ${(s.tl_color||'').toUpperCase()} | 🚶 ${s.ped_count} | 🚗 ${s.veh_count} | Nearest: ${Number(s.nearest_vehicle_distance_m).toFixed(1)} m | `+
-        `Speed: ${Number(s.avg_vehicle_speed_mps).toFixed(1)} m/s (${(Number(s.avg_vehicle_speed_mps)*3.6).toFixed(0)} km/h)`;
+        `TL: ${(s.tl_color||'').toUpperCase()} | 🚶 ${s.ped_count} | 🚗 ${s.veh_count} | `+
+        `Nearest: ${Number(s.nearest_vehicle_distance_m).toFixed(1)} m | `+
+        `Speed: ${Number(s.avg_vehicle_speed_mps).toFixed(1)} m/s (`+
+        `${(Number(s.avg_vehicle_speed_mps)*3.6).toFixed(0)} km/h)`;
 
-      // Boards & scenario
-      const text = scenarioBanner(s);
-      document.getElementById("scenarioMessage").textContent = text;
-      document.getElementById("scenarioMessage2").textContent = text;
+      // Scenario text
+      const scen = scenarioBanner(s);
+      document.getElementById("scenarioMessage").textContent = scen;
+      document.getElementById("scenarioMessage2").textContent = scen;
 
+      // Light badge
       const lb = document.getElementById("lightBadge");
-      lb.className = 'light ' + (s.tl_color||'');
-      lb.textContent = (s.tl_color||'').toUpperCase();
+      if (lb){
+        lb.className = 'light ' + (s.tl_color||'');
+        lb.textContent = (s.tl_color||'').toUpperCase();
+      }
 
-      badge(document.getElementById("boardVeh"), `Vehicle LED: ${s.board_veh||'OFF'}`, (s.board_veh||'OFF')!=='OFF');
-      badge(document.getElementById("boardPedL"), `Ped LED (Left): ${s.board_ped_l||'OFF'}`, (s.board_ped_l||'OFF')!=='OFF');
-      badge(document.getElementById("boardPedR"), `Ped LED (Right): ${s.board_ped_r||'OFF'}`, (s.board_ped_r||'OFF')!=='OFF');
-
-      // scenario pills
-      document.getElementById("status1")?.classList.toggle("active", s.scenario==="scenario_1_night_ped");
-      document.getElementById("status1")?.classList.toggle("offline", s.scenario!=="scenario_1_night_ped");
-      document.getElementById("status2")?.classList.toggle("active", s.scenario==="scenario_2_rush_hold");
-      document.getElementById("status2")?.classList.toggle("offline", s.scenario!=="scenario_2_rush_hold");
-      document.getElementById("status3")?.classList.toggle("active", s.scenario==="scenario_3_emergency");
-      document.getElementById("status3")?.classList.toggle("offline", s.scenario!=="scenario_3_emergency");
+      // Board badges
+      badge(document.getElementById("boardVeh"),
+            `Vehicle LED: ${s.board_veh||'OFF'}`, (s.board_veh||'OFF')!=='OFF');
+      badge(document.getElementById("boardPedL"),
+            `Ped LED (Left): ${s.board_ped_l||'OFF'}`, (s.board_ped_l||'OFF')!=='OFF');
+      badge(document.getElementById("boardPedR"),
+            `Ped LED (Right): ${s.board_ped_r||'OFF'}`, (s.board_ped_r||'OFF')!=='OFF');
     });
   }
 
-  // ===== ANALYTICS =====
+  // ========= ANALYTICS (minute buckets) =========
   async function loadAnalytics(){
     try {
       const res = await fetch(BASE_URL + "/api/analytics");
       const rows = await res.json();
 
-      // minute buckets, pad missing minutes
       const now = Date.now();
-      const map = new Map(rows.map(r => [r.minute, r]));
+      const byMinute = new Map(rows.map(r => [r.minute, r]));
       const padded = [];
       for (let i=9;i>=0;i--){
         const d = new Date(now - i*60000);
         const label = d.toISOString().slice(0,16).replace('T',' ');
-        const r = map.get(label) || {minute: label, avg_ped:0, avg_veh:0, go:0, stop:0, off:0};
-        padded.push(r);
+        padded.push(byMinute.get(label) || {minute: label, avg_ped:0, avg_veh:0, go:0, stop:0, off:0});
       }
 
       const labels = padded.map(r => r.minute.slice(11)); // HH:MM
@@ -287,8 +335,11 @@
       if (!densityChart){
         densityChart = new Chart(document.getElementById('densityChart'), {
           type: 'bar',
-          data: { labels, datasets: [{ label:'Avg Pedestrians', data: ped }, { label:'Avg Vehicles', data: veh }] },
-          options: { responsive:true, maintainAspectRatio:false }
+          data: { labels, datasets: [
+            { label: 'Avg Pedestrians', data: ped },
+            { label: 'Avg Vehicles', data: veh }
+          ]},
+          options: { responsive: true, maintainAspectRatio: false }
         });
       } else {
         densityChart.data.labels = labels;
@@ -300,8 +351,12 @@
       if (!decisionChart){
         decisionChart = new Chart(document.getElementById('decisionChart'), {
           type: 'line',
-          data: { labels, datasets: [{ label:'GO', data: go }, { label:'STOP', data: stop }, { label:'OFF', data: off }] },
-          options: { responsive:true, maintainAspectRatio:false }
+          data: { labels, datasets: [
+            { label: 'GO', data: go },
+            { label: 'STOP', data: stop },
+            { label: 'OFF', data: off }
+          ]},
+          options: { responsive: true, maintainAspectRatio: false }
         });
       } else {
         decisionChart.data.labels = labels;
@@ -315,11 +370,11 @@
     }
   }
 
-  // ===== ARCHIVE =====  (latest first, descending)
+  // ========= ARCHIVE (descending) =========
   async function loadArchive(limit=200){
     try {
       const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
-      const rows = await res.json();  // already DESC from server
+      const rows = await res.json(); // server already returns DESC
       const tbody = document.querySelector("#logs tbody");
       if (!tbody) return;
       tbody.innerHTML = "";
@@ -337,7 +392,7 @@
     }
   }
 
-  // UI-only scenario toggles
+  // ========= Scenario toggle (UI only) =========
   function toggleScenario(checkbox) {
     const statusText = checkbox.closest('.scenario-header').querySelector('.status-text');
     if (!statusText) return;
