@@ -293,6 +293,32 @@ def api_logs_clear():
     conn.close()
     return jsonify({"ok": True, "deleted": int(deleted)})
 
+@app.get("/api/scenario_mode")
+def api_get_scenario_mode():
+    return jsonify({"mode": SCENARIO_MODE})
+
+@app.post("/api/scenario_mode")
+def api_set_scenario_mode():
+    global SCENARIO_MODE
+    mode = (request.json or {}).get("mode", "auto").lower()
+    if mode not in ("auto", "vehicle", "pedestrian", "emergency"):
+        return jsonify({"ok": False, "msg": "invalid mode"}), 400
+    SCENARIO_MODE = mode
+    # Broadcast so dashboards update immediately
+    socketio.emit("scenario_mode", {"mode": SCENARIO_MODE}, namespace="/realtime")
+    return jsonify({"ok": True, "mode": SCENARIO_MODE})
+
+@app.post("/api/logs/clear")
+def api_logs_clear():
+    try:
+        conn = _db_connect()
+        conn.execute("DELETE FROM events;")
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": repr(e)}), 500
+
 # --------------------- realtime emits ---------------------
 def tail_db_emit():
     print("[flask_app] DB tailer started")
@@ -345,7 +371,6 @@ def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
         "rush": flags.get("rush", False),
         "ambulance": extra.get("ambulance", False),
     })
-    scenario_to_show = board_state.get("scenario", "baseline") or "baseline"
     with _state_lock:
         latest_status.update({
             "ts": float(now_ts),
@@ -355,12 +380,12 @@ def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
             "nearest_vehicle_distance_m": float(nearest_m),
             "avg_vehicle_speed_mps": float(avg_mps),
             "action": action,
-            "scenario": scenario_to_show if scenario_to_show != "baseline" else scenario,
-            "board_veh": board_state["board_veh"],
-            "board_ped_l": board_state["board_ped_l"],
-            "board_ped_r": board_state["board_ped_r"],
+            "scenario": scenario,
         })
-    socketio.emit("status", latest_status, namespace="/realtime")
+    socketio.emit("status", {
+        **latest_status,
+        "program_mode": SCENARIO_MODE,   # <-- new
+    }, namespace="/realtime")
 
 # --------------------- MAIN ---------------------
 def start_http_server(host="0.0.0.0", port=5000):
