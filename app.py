@@ -560,7 +560,6 @@ def run_pipeline():
                     avg_mps=avg_speed_mps,
                     flags=flags,
                     extra=extra,
-                    online=online,
                 )
                 last_status_ts = now
 
