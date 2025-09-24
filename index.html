@@ -1,372 +1,339 @@
-import eventlet
-eventlet.monkey_patch()  # MUST be first
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>LED-Board Optimization</title>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<div class="page-wrapper">
 
-import os
-import sqlite3
-import threading
-import time
-from typing import Dict, Optional, Tuple, List
+  <!-- ============== LOGIN PAGE ============== -->
+  <div id="loginPage" class="login-body" style="display:flex;">
+    <div class="login-container">
+      <h2>AI-Driven LED Board System</h2>
+      <input id="user" type="text" placeholder="Username" autocomplete="username"/>
+      <input id="pass" type="password" placeholder="Password" autocomplete="current-password"/>
+      <button onclick="doLogin()">Login</button>
+      <p class="note">For demo: use any username & password</p>
+    </div>
+  </div>
 
-import cv2
-import numpy as np
-from flask import Flask, Response, jsonify, request, send_from_directory
-from flask_socketio import SocketIO
+  <!-- ============== APP (DASHBOARD/ANALYTICS/SCENARIOS/LOGS) ============== -->
+  <div id="dashboardPage" style="display:none;">
 
-print("[flask_app] module import starting...")
+    <!-- NAVBAR -->
+    <header>
+      <div class="header-container">
+        <div class="logo"><img src="images/Adamson.png" alt="Logo"></div>
+        <h1>LED-Board Optimization</h1>
+        <nav>
+          <a href="#" data-tab="dashboard" onclick="openTab('dashboard')">Dashboard</a>
+          <a href="#" data-tab="analytics" onclick="openTab('analytics')">Analytics</a>
+          <a href="#" data-tab="scenarios" onclick="openTab('scenarios')">Scenarios</a>
+          <a href="#" data-tab="logs" onclick="openTab('logs')">Archive</a>
+        </nav>
+        <button class="logout-btn" onclick="logout()">Logout</button>
+      </div>
+    </header>
 
-# --------------------- CONFIG ---------------------
-DB_PATH = os.getenv("SC_DB", "smart_crosswalk.db")
-JPEG_QUALITY = int(os.getenv("SC_JPEG_QUALITY", "70"))  # lower = smaller, faster
-STREAM_INTERVAL_S = float(os.getenv("SC_STREAM_INTERVAL", "0.03"))
-DB_TAIL_INTERVAL_S = float(os.getenv("SC_DB_TAIL_INTERVAL", "0.5"))
+    <!-- ============== DASHBOARD ============== -->
+    <section id="dashboard" class="container active">
+      <h2>📡 Live Monitoring — Adamson University San Marcelino St.</h2>
 
-# --------------------- SHARED STATE ---------------------
-latest_frames: Dict[str, Optional[np.ndarray]] = {"ped": None, "veh": None, "tl": None}
-latest_jpegs:  Dict[str, Optional[bytes]]     = {"ped": None, "veh": None, "tl": None}
+      <div class="grid-dashboard">
+        <div class="card">
+          <h3>Pedestrian Camera</h3>
+          <div class="camera-feed"><img id="camPed" alt="Pedestrian Camera" loading="eager"></div>
+        </div>
 
-# Current board & scenario state (controlled by /api/set_scenario)
-board_state = {
-    "board_veh": "OFF",      # "ON" or "OFF"
-    "board_ped_l": "OFF",
-    "board_ped_r": "OFF",
-    "scenario": "baseline"   # baseline | scenario_1_night_ped | scenario_2_rush_hold | scenario_3_emergency
+        <div class="card">
+          <h3>Vehicle Camera</h3>
+          <div class="camera-feed"><img id="camVeh" alt="Vehicle Camera" loading="eager"></div>
+        </div>
+
+        <div class="card">
+          <h3>Traffic Light Detector</h3>
+          <div class="camera-feed"><img id="camTL" alt="Traffic Light Camera" loading="eager"></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>System Status</h3>
+          <p><strong>Status:</strong> <span id="sysStatus" class="status-text offline">OFFLINE</span></p>
+          <p><strong>Current Decision:</strong> <span id="curDecision">—</span></p>
+          <p id="metricLine">TL: — | 🧍 0 | 🚗 0 | Nearest: 0.0 m | Speed: 0.0 m/s (0 km/h)</p>
+        </div>
+
+        <!-- Scenario Program card -->
+        <div class="card">
+          <h3>Scenario Program</h3>
+          <p><strong>Program:</strong> <span id="programLabel">AUTO</span></p>
+          <div id="scenarioPills" style="display:flex;gap:10px;flex-wrap:wrap;margin:.5rem 0;">
+            <span class="status-text offline" id="pillVehicle">Vehicle Priority</span>
+            <span class="status-text offline" id="pillPed">Pedestrian Priority</span>
+            <span class="status-text offline" id="pillEmergency">Emergency Vehicle</span>
+          </div>
+          <div style="margin-top:.5rem;">
+            <strong>Current Light:</strong> <span id="curLight" class="light">—</span>
+          </div>
+          <div style="margin-top:.75rem;display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="logout-btn" style="background:#0a7" onclick="setProgram('auto')">Auto</button>
+            <button class="logout-btn" onclick="setProgram('vehicle')">Vehicle</button>
+            <button class="logout-btn" onclick="setProgram('pedestrian')">Pedestrian</button>
+            <button class="logout-btn" onclick="setProgram('emergency')">Emergency</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============== ANALYTICS ============== -->
+    <section id="analytics" class="container">
+      <h2>📊 Analytics</h2>
+
+      <div class="grid-2">
+        <div class="card" style="height:360px;">
+          <h3>Vehicle & Pedestrian Density (last 10 minutes)</h3>
+          <canvas id="densityChart"></canvas>
+        </div>
+        <div class="card" style="height:360px;">
+          <h3>Decision Breakdown (GO/STOP/OFF)</h3>
+          <canvas id="decisionChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============== SCENARIOS ============== -->
+    <section id="scenarios" class="container">
+      <h2>🚦 Scenarios</h2>
+      <p id="scnBanner"><strong>LED Board:</strong> <span>—</span></p>
+
+      <div class="card scenario-card">
+        <div class="scenario-header">
+          <h3>Vehicle Priority</h3>
+          <div class="status-control"><span class="status-text active">Active</span></div>
+        </div>
+        <ul>
+          <li><strong>Pedestrian Camera:</strong> 5–10 students waiting</li>
+          <li><strong>Vehicle Camera:</strong> Heavy traffic 20+ Vehicles</li>
+          <li><strong>Traffic Light:</strong> Red</li>
+        </ul>
+        <p><strong>YOLOv8 Action:</strong> Vehicles priority to ease congestion.<br>
+        LED: <em>“Vehicles Priority – Wait to Cross”</em></p>
+      </div>
+
+      <div class="card scenario-card">
+        <div class="scenario-header">
+          <h3>Pedestrian Priority</h3>
+          <div class="status-control"><span class="status-text active">Active</span></div>
+        </div>
+        <ul>
+          <li><strong>Pedestrian Camera:</strong> 30+ waiting</li>
+          <li><strong>Vehicle Camera:</strong> 0–5 Vehicles</li>
+          <li><strong>Traffic Light:</strong> Green</li>
+        </ul>
+        <p><strong>YOLOv8 Action:</strong> Prioritize pedestrians (high density, low vehicles).<br>
+        LED: <em>“Prepare to Stop – Pedestrians Crossing”</em></p>
+      </div>
+
+      <div class="card scenario-card">
+        <div class="scenario-header">
+          <h3>Emergency Vehicle Detected</h3>
+          <div class="status-control"><span class="status-text active">Active</span></div>
+        </div>
+        <ul>
+          <li><strong>Pedestrian Camera:</strong> ~20 waiting</li>
+          <li><strong>Vehicle Camera:</strong> Ambulance with siren</li>
+          <li><strong>Traffic Light:</strong> Yellow → Red</li>
+        </ul>
+        <p><strong>YOLOv8 Action:</strong> Override for ambulance right-of-way.<br>
+        LED: <em>“Emergency Vehicle Passing – Please Wait”</em></p>
+      </div>
+    </section>
+
+    <!-- ============== LOGS ============== -->
+    <section id="logs" class="container">
+      <h2>🗄️ System Logs</h2>
+      <div style="margin-bottom:10px;">
+        <button class="logout-btn" onclick="clearLogs()">Clear Logs</button>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Event</th><th>Status (Boards)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <p>© 2025 Adamson University | AI-Driven LED Board Optimization</p>
+    </footer>
+  </div>
+</div>
+
+<!-- libs -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+<script>
+// ================== CONFIG / LOGIN ==================
+const BASE_URL = location.origin.replace(/\/$/, '');
+function doLogin(){
+  if (!user.value || !pass.value) { alert("Enter any username and password for demo"); return; }
+  localStorage.setItem("loggedInUser", user.value.trim());
+  showDashboard();
+}
+function logout(){
+  localStorage.removeItem("loggedInUser");
+  localStorage.removeItem("activeTab");
+  showLogin();
+}
+function showDashboard(){
+  loginPage.style.display = "none";
+  dashboardPage.style.display = "block";
+  setCamSrcs();
+  openTab(localStorage.getItem("activeTab") || "dashboard");
+}
+function showLogin(){
+  loginPage.style.display = "flex";
+  dashboardPage.style.display = "none";
+}
+window.addEventListener("load", () => {
+  if (localStorage.getItem("loggedInUser")) showDashboard();
+  else showLogin();
+});
+
+// ================== TAB / STREAMS ==================
+function openTab(id){
+  document.querySelectorAll('.container').forEach(s=>s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  document.querySelectorAll('header nav a').forEach(a => {
+    a.classList.toggle('active', a.getAttribute('data-tab') === id);
+  });
+  localStorage.setItem("activeTab", id);
+  if (id === "logs") loadArchive();
+  if (id === "analytics") loadAnalytics();
+}
+function setCamSrcs(){
+  camPed.src = BASE_URL + "/stream/ped";
+  camVeh.src = BASE_URL + "/stream/veh";
+  camTL.src  = BASE_URL + "/stream/tl";
 }
 
-latest_status = {
-    "ts": 0.0,
-    "ped_count": 0,
-    "veh_count": 0,
-    "tl_color": "unknown",
-    "nearest_vehicle_distance_m": 0.0,
-    "avg_vehicle_speed_mps": 0.0,
-    "action": "OFF",
-    "scenario": "baseline",
-    # still tracked, but not shown as badges anymore
-    "board_veh": "OFF",
-    "board_ped_l": "OFF",
-    "board_ped_r": "OFF",
+// ================== SOCKET / STATUS ==================
+const socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
+let lastStatusTs = 0;
+setInterval(() => {
+  const online = (Date.now() - lastStatusTs) < 5000;
+  sysStatus.textContent = online ? "ONLINE" : "OFFLINE";
+  sysStatus.classList.toggle("active", online);
+  sysStatus.classList.toggle("offline", !online);
+}, 800);
+
+function highlightScenario(key){
+  const isVeh = key === "scenario_2_rush_hold";
+  const isPed = key === "scenario_1_night_ped";
+  const isEm  = key === "scenario_3_emergency";
+  pillVehicle.classList.toggle("active", isVeh);
+  pillVehicle.classList.toggle("offline", !isVeh);
+  pillPed.classList.toggle("active", isPed);
+  pillPed.classList.toggle("offline", !isPed);
+  pillEmergency.classList.toggle("active", isEm);
+  pillEmergency.classList.toggle("offline", !isEm);
 }
-# --- Scenario Program Override ---
-# One of: "auto", "vehicle", "pedestrian", "emergency"
-SCENARIO_MODE = "auto"
+socket.on("status", s => {
+  lastStatusTs = Date.now();
+  curDecision.textContent = `${s.action || '—'} ${s.scenario ? '('+s.scenario+')' : ''}`;
+  const kmh = (Number(s.avg_vehicle_speed_mps)||0) * 3.6;
+  metricLine.textContent =
+    `TL: ${(s.tl_color||'—').toUpperCase()} | 🧍 ${s.ped_count||0} | 🚗 ${s.veh_count||0} | Nearest: ${Number(s.nearest_vehicle_distance_m||0).toFixed(1)} m | Speed: ${Number(s.avg_vehicle_speed_mps||0).toFixed(1)} m/s (${kmh.toFixed(0)} km/h)`;
+  curLight.className = 'light ' + (s.tl_color||'');
+  curLight.textContent = (s.tl_color||'—').toUpperCase();
+  if (s.program_mode) programLabel.textContent = s.program_mode.toUpperCase();
+  highlightScenario(s.scenario || 'baseline');
+});
+socket.on("scenario_mode", payload => {
+  if (payload?.mode) programLabel.textContent = payload.mode.toUpperCase();
+});
 
-_state_lock = threading.Lock()
+// ================== PROGRAM OVERRIDE ==================
+async function setProgram(mode){
+  try{
+    const res = await fetch(BASE_URL + "/api/scenario_mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode })
+    });
+    const data = await res.json();
+    if (!data.ok) alert("Failed: " + (data.msg || ''));
+  }catch(e){ console.error(e); }
+}
 
-# --------------------- APP / SOCKET ---------------------
-app = Flask(__name__, static_folder="static", static_url_path="")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+// ================== ANALYTICS ==================
+let densityChart, decisionChart, chartsLoaded=false;
+async function loadAnalytics(){
+  if (chartsLoaded) return;
+  try{
+    const res = await fetch(BASE_URL + "/api/analytics");
+    const rows = await res.json();
 
-@app.get("/")
-def root_index():
-    return send_from_directory(app.static_folder, "index.html")
+    const labels = rows.map(r => r.minute);
+    const ped = rows.map(r => r.avg_ped);
+    const veh = rows.map(r => r.avg_veh);
+    const go  = rows.map(r => r.go);
+    const stop= rows.map(r => r.stop);
+    const off = rows.map(r => r.off);
 
-# Optional favicon (avoid 404)
-@app.get("/favicon.ico")
-def favicon():
-    path = os.path.join(app.static_folder, "favicon.ico")
-    if os.path.exists(path):
-        return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/vnd.microsoft.icon")
-    png = os.path.join(app.static_folder, "images", "Adamson.png")
-    if os.path.exists(png):
-        return send_from_directory(os.path.dirname(png), "Adamson.png", mimetype="image/png")
-    return ("", 204)
+    densityChart = new Chart(document.getElementById('densityChart'), {
+      type: 'bar',
+      data: { labels, datasets: [
+        { label:'Avg Pedestrians', data: ped },
+        { label:'Avg Vehicles', data: veh },
+      ]},
+      options: { responsive:true, maintainAspectRatio:false }
+    });
 
-@app.get("/api/health")
-def api_health():
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=1.0)
-        conn.execute("PRAGMA user_version;")
-        conn.close()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "msg": repr(e)}), 500
+    decisionChart = new Chart(document.getElementById('decisionChart'), {
+      type: 'line',
+      data: { labels, datasets: [
+        { label:'GO', data: go },
+        { label:'STOP', data: stop },
+        { label:'OFF', data: off },
+      ]},
+      options: { responsive:true, maintainAspectRatio:false }
+    });
 
-# --------------------- SCENARIO ---------------------
-def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
-                    tl_color: str, flags: Dict[str, bool]) -> Tuple[str, str]:
-    """
-    Returns (action, scenario_key)
+    chartsLoaded = true;
+  }catch(e){ console.error("Analytics load failed:", e); }
+}
 
-    scenario_key is one of:
-      - "scenario_1_night_ped"  -> show as "Pedestrian Priority"
-      - "scenario_2_rush_hold"  -> show as "Vehicle Priority"
-      - "scenario_3_emergency"  -> show as "Emergency Vehicle"
-      - "baseline"               -> default/fallback
-    """
-    # Honor manual override first
-    if SCENARIO_MODE == "vehicle":
-        return ("OFF", "scenario_2_rush_hold")
-    if SCENARIO_MODE == "pedestrian":
-        return ("STOP" if tl_color in ("yellow", "red") else "GO", "scenario_1_night_ped")
-    if SCENARIO_MODE == "emergency":
-        return ("GO", "scenario_3_emergency")
-
-    # Auto mode (existing rules)
-    if flags.get("ambulance", False):
-        return ("GO", "scenario_3_emergency")
-    if flags.get("night", False) and ped_count >= 30 and veh_count <= 2 and tl_color == "green":
-        return ("STOP", "scenario_1_night_ped")
-    if flags.get("rush", False) and (5 <= ped_count <= 10) and veh_count >= 20 and tl_color == "red":
-        return ("OFF", "scenario_2_rush_hold")
-
-    # baseline
-    action = "OFF"
-    if tl_color == "red":
-        action = "STOP"
-    elif tl_color == "green":
-        if ped_count > 0 and veh_count > 0:
-            action = "STOP"
-        elif ped_count > 0:
-            action = "GO"
-    elif tl_color == "yellow":
-        action = "STOP" if ped_count > 0 else "OFF"
-    else:
-        if ped_count > 0 and veh_count > 0:
-            action = "STOP"
-        elif ped_count > 0:
-            action = "GO"
-    return (action, "baseline")
-
-
-# --------------------- MJPEG STREAMING (uses cached JPEGs) ---------------------
-def mjpeg_stream(key: str):
-    boundary = b"--frame"
-    header   = b"Content-Type: image/jpeg\r\nCache-Control: no-cache\r\n\r\n"
-    while True:
-        with _state_lock:
-            jpg = latest_jpegs.get(key)
-        if jpg is None:
-            socketio.sleep(0.03)
-            continue
-        yield boundary + b"\r\n" + header + jpg + b"\r\n"
-        socketio.sleep(STREAM_INTERVAL_S)
-
-@app.get("/stream/<cam>")
-def stream_cam(cam: str):
-    if cam not in ("ped", "veh", "tl"):
-        return "unknown cam", 404
-    return Response(mjpeg_stream(cam), mimetype="multipart/x-mixed-replace; boundary=frame")
-
-# --------------------- DB HELPERS ---------------------
-def _db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=3.0, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=3000;")
-    return conn
-
-def _safe_query_rows(sql: str, args=()):
-    try:
-        conn = _db_connect()
-        cur = conn.cursor()
-        cur.execute(sql, args)
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except sqlite3.OperationalError as e:
-        if "no such table" in str(e).lower():
-            return []
-        raise
-
-# --------------------- REST APIs ---------------------
-@app.get("/api/status")
-def api_status():
-    with _state_lock:
-        return jsonify(latest_status)
-
-@app.get("/api/status_now")
-def api_status_now():
-    """Simple poll endpoint the dashboard can use if Socket.IO fails."""
-    with _state_lock:
-        return jsonify(latest_status)
-
-@app.get("/api/logs")
-def api_logs():
-    limit = int(request.args.get("limit", 100))
-    rows = _safe_query_rows(
-        """
-        SELECT id, ts, ped_count, veh_count, tl_color,
-               nearest_vehicle_distance_m, avg_vehicle_speed_mps, action
-        FROM events
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    with _state_lock:
-        bveh = latest_status.get("board_veh", "OFF")
-        pl   = latest_status.get("board_ped_l", "OFF")
-        pr   = latest_status.get("board_ped_r", "OFF")
-    return jsonify([
-        {
-            "id": int(r[0]),
-            "ts": float(r[1]),
-            "ped_count": int(r[2]),
-            "veh_count": int(r[3]),
-            "tl_color": str(r[4]),
-            "nearest_vehicle_distance_m": float(r[5]),
-            "avg_vehicle_speed_mps": float(r[6]),
-            "action": str(r[7]),
-            "board_veh": bveh,
-            "board_ped_l": pl,
-            "board_ped_r": pr,
-        }
-        for r in rows
-    ])
-
-@app.get("/api/analytics")
-def api_analytics():
-    # minute-level aggregates for last 60 minutes
-    rows = _safe_query_rows(
-        """
-        SELECT strftime('%Y-%m-%d %H:%M', ts, 'unixepoch') AS minute,
-               AVG(ped_count), AVG(veh_count),
-               SUM(action='GO'), SUM(action='STOP'), SUM(action='OFF')
-        FROM events
-        WHERE ts >= strftime('%s','now','-60 minutes')
-        GROUP BY minute
-        ORDER BY minute ASC
-        """
-    )
-    return jsonify([
-        {
-            "minute": m,
-            "avg_ped": float(p or 0),
-            "avg_veh": float(v or 0),
-            "go": int(go or 0),
-            "stop": int(st or 0),
-            "off": int(off or 0),
-        }
-        for (m, p, v, go, st, off) in rows
-    ])
-
-@app.post("/api/set_scenario")
-def api_set_scenario():
-    """Set current scenario name and/or board LED states from the Scenarios tab."""
-    data = request.get_json(silent=True) or {}
-    name = data.get("scenario")     # optional string
-    veh  = data.get("board_veh")    # "ON"/"OFF" optional
-    pl   = data.get("board_ped_l")  # "ON"/"OFF" optional
-    pr   = data.get("board_ped_r")  # "ON"/"OFF" optional
-    with _state_lock:
-        if isinstance(name, str) and name:
-            board_state["scenario"] = name
-            latest_status["scenario"] = name
-        for k, v in (("board_veh",veh), ("board_ped_l",pl), ("board_ped_r",pr)):
-            if v in ("ON","OFF"):
-                board_state[k] = v
-                latest_status[k] = v
-    socketio.emit("status", latest_status, namespace="/realtime")
-    return jsonify({"ok": True, "state": {**board_state}})
-
-# ---- Archive management ----
-@app.post("/api/logs/delete")
-def api_logs_delete():
-    data = request.get_json(silent=True) or {}
-    ids: List[int] = data.get("ids") or []
-    if not ids:
-        return jsonify({"ok": False, "msg": "no ids"}), 400
-    placeholders = ",".join("?" for _ in ids)
-    conn = _db_connect()
-    cur = conn.cursor()
-    cur.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "deleted": int(deleted)})
-
-@app.post("/api/logs/clear")
-def api_logs_clear():
-    data = request.get_json(silent=True) or {}
-    all_flag = bool(data.get("all"))
-    older_than = data.get("older_than_seconds")  # optional
-    conn = _db_connect()
-    cur = conn.cursor()
-    if all_flag:
-        cur.execute("DELETE FROM events")
-    elif older_than is not None:
-        cur.execute("DELETE FROM events WHERE ts < strftime('%s','now') - ?", (int(older_than),))
-    else:
-        return jsonify({"ok": False, "msg": "provide {all:true} or older_than_seconds"}), 400
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "deleted": int(deleted)})
-
-# --------------------- realtime emits ---------------------
-def tail_db_emit():
-    print("[flask_app] DB tailer started")
-    last_id = 0
-    while True:
-        try:
-            rows = _safe_query_rows(
-                """
-                SELECT id, ts, ped_count, veh_count, tl_color,
-                       nearest_vehicle_distance_m, avg_vehicle_speed_mps, action
-                FROM events
-                ORDER BY id DESC LIMIT 1
-                """
-            )
-            if rows:
-                row = rows[0]
-                if row[0] != last_id:
-                    last_id = row[0]
-                    payload = {
-                        "ts": float(row[1]),
-                        "ped_count": int(row[2]),
-                        "veh_count": int(row[3]),
-                        "tl_color": str(row[4]),
-                        "nearest_vehicle_distance_m": float(row[5]),
-                        "avg_vehicle_speed_mps": float(row[6]),
-                        "action": str(row[7]),
-                        "scenario": latest_status.get("scenario","baseline"),
-                        "board_veh": latest_status.get("board_veh","OFF"),
-                        "board_ped_l": latest_status.get("board_ped_l","OFF"),
-                        "board_ped_r": latest_status.get("board_ped_r","OFF"),
-                    }
-                    socketio.emit("status", payload, namespace="/realtime")
-                    socketio.emit("log_insert", payload, namespace="/realtime")
-        except Exception as e:
-            print("[flask_app] tailer error:", repr(e))
-        socketio.sleep(DB_TAIL_INTERVAL_S)
-
-# --------------------- HOOKS (called by app.py) ---------------------
-def publish_frame(cam_key: str, frame: np.ndarray):
-    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-    with _state_lock:
-        latest_frames[cam_key] = frame
-        latest_jpegs[cam_key]  = buf.tobytes() if ok else None
-
-def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
-                             tl_color: str, nearest_m: float, avg_mps: float,
-                             flags: Dict[str, bool], extra: Dict[str, bool]):
-    action, scenario = decide_scenario(now_ts, ped_count, veh_count, tl_color, {
-        "night": flags.get("night", False),
-        "rush": flags.get("rush", False),
-        "ambulance": extra.get("ambulance", False),
-    })
-    scenario_to_show = board_state.get("scenario", "baseline") or "baseline"
-    with _state_lock:
-        latest_status.update({
-            "ts": float(now_ts),
-            "ped_count": int(ped_count),
-            "veh_count": int(veh_count),
-            "tl_color": str(tl_color),
-            "nearest_vehicle_distance_m": float(nearest_m),
-            "avg_vehicle_speed_mps": float(avg_mps),
-            "action": action,
-            "scenario": scenario_to_show if scenario_to_show != "baseline" else scenario,
-            "board_veh": board_state["board_veh"],
-            "board_ped_l": board_state["board_ped_l"],
-            "board_ped_r": board_state["board_ped_r"],
-        })
-    socketio.emit("status", latest_status, namespace="/realtime")
-
-# --------------------- MAIN ---------------------
-def start_http_server(host="0.0.0.0", port=5000):
-    print(f"[flask_app] Starting Flask-SocketIO on http://{host}:{port} ...")
-    socketio.start_background_task(tail_db_emit)
-    socketio.run(app, host=host, port=port, debug=False)
-
-if __name__ == "__main__":
-    start_http_server()
+// ================== ARCHIVE ==================
+async function loadArchive(limit=200){
+  try{
+    const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
+    const rows = await res.json();
+    const tbody = document.querySelector("#logs tbody");
+    tbody.innerHTML = "";
+    rows.forEach(r => {
+      const tr = document.createElement("tr");
+      const t = new Date(r.ts * 1000).toLocaleTimeString();
+      tr.innerHTML = `<td>${t}</td>
+                      <td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td>
+                      <td>${r.action}</td>`;
+      tbody.appendChild(tr);
+    });
+  }catch(e){ console.error("Archive load failed:", e); }
+}
+async function clearLogs(){
+  if (!confirm("Clear all logs?")) return;
+  try{
+    const res = await fetch(BASE_URL + "/api/logs/clear", { method:"POST" });
+    const data = await res.json();
+    if (data.ok) loadArchive(); else alert("Failed to clear logs");
+  }catch(e){ console.error(e); }
+}
+</script>
+</body>
+</html>
