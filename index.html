@@ -1,628 +1,349 @@
 <!DOCTYPE html>
-
 <html lang="en">
-
 <head>
-
   <meta charset="UTF-8" />
-
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-
   <title>AI-Driven LED Board Optimization</title>
-
   <link rel="stylesheet" href="style.css"/>
-
 </head>
-
 <body>
-
 <div class="page-wrapper">
 
-
-
   <!-- LOGIN -->
-
   <div id="loginPage" class="login-body" style="display:flex;">
-
     <div class="login-container">
-
       <h2>AI-Driven LED Board System</h2>
-
       <input id="user" type="text" placeholder="Username" autocomplete="username"/>
-
       <input id="pass" type="password" placeholder="Password" autocomplete="current-password"/>
-
       <button onclick="doLogin()">Login</button>
-
       <p class="note">For demo: use any username & password</p>
-
     </div>
-
   </div>
-
-
 
   <!-- DASHBOARD -->
-
   <div id="dashboardPage" style="display:none;">
-
-
-
     <header>
-
       <div class="header-container">
-
         <div class="logo"><img src="images/Adamson.png" alt="Logo"></div>
-
         <h1>LED-Board Optimization</h1>
-
         <nav>
-
           <a href="#" data-tab="dashboard" onclick="openTab('dashboard')">Dashboard</a>
-
           <a href="#" data-tab="analytics" onclick="openTab('analytics')">Analytics</a>
-
           <a href="#" data-tab="scenarios" onclick="openTab('scenarios')">Scenarios</a>
-
           <a href="#" data-tab="logs" onclick="openTab('logs')">Archive</a>
-
         </nav>
-
         <button class="logout-btn" onclick="logout()">Logout</button>
-
       </div>
-
     </header>
 
-
-
     <section id="dashboard" class="container active">
-
-      <h2>ðŸ“¡ Live Monitoring â€” Adamson University San Marcelino St.</h2>
+      <h2>📡 Live Monitoring — Adamson University San Marcelino St.</h2>
 
       <div class="grid-dashboard">
-
         <div class="card">
-
           <h3>Pedestrian Camera</h3>
-
           <div class="camera-feed"><img id="camPed" alt="Pedestrian Camera" loading="eager"></div>
-
         </div>
-
         <div class="card">
-
           <h3>Vehicle Camera</h3>
-
           <div class="camera-feed"><img id="camVeh" alt="Vehicle Camera" loading="eager"></div>
-
         </div>
-
         <div class="card">
-
           <h3>Traffic Light Detector</h3>
-
           <div class="camera-feed"><img id="camTL" alt="Traffic Light Camera" loading="eager"></div>
-
         </div>
-
       </div>
-
-
 
       <div class="grid-2" style="margin-top:1rem;">
-
-        <div class="card status">
-
-          <p><strong>System Status:</strong> OFFLINE</p>
-
-          <p><strong>Current Decision:</strong> OFFLINE</p>
-
-          <p><strong>TL:</strong> â€” | ðŸš¶ 0 | ðŸš— 0 | Nearest: 0.0 m | Speed: 0.0 m/s (0 km/h)</p>
-
+        <!-- Left: System Status -->
+        <div class="card status" id="systemCard">
+          <p><strong>System Status:</strong> <span id="sysOnline" class="status-text offline">OFFLINE</span></p>
+          <p><strong>Current Decision:</strong> <span id="sysDecision">—</span></p>
+          <p id="sysLine">TL: — | 🚶 0 | 🚗 0 | Nearest: 0.0 m | Speed: 0.0 m/s (0 km/h)</p>
         </div>
 
+        <!-- Right: Boards & Scenarios -->
         <div class="card">
-
-          <h3>Traffic Light & Next Action</h3>
-
-          <p>Current Light: <span class="light">â€”</span></p>
-
-          <p>Next Action (live): <strong><span id="scenarioMessage">â€”</span></strong></p>
-
+          <h3>Boards & Scenario</h3>
+          <p>Scenario: <strong id="scenarioMessage">—</strong></p>
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <span class="status-text offline" id="boardVeh">Vehicle LED: OFF</span>
+            <span class="status-text offline" id="boardPedL">Ped LED (Left): OFF</span>
+            <span class="status-text offline" id="boardPedR">Ped LED (Right): OFF</span>
+          </div>
+          <p style="margin-top:.75rem;">Current Light: <span class="light" id="lightBadge">—</span></p>
         </div>
-
       </div>
-
     </section>
-
-
 
     <section id="analytics" class="container">
-
-      <h2>ðŸ“Š Analytics</h2>
-
+      <h2>📊 Analytics</h2>
       <div class="grid-2">
-
         <div class="card" style="height:360px;">
-
           <h3>Vehicle & Pedestrian Density (last 10 minutes)</h3>
-
           <canvas id="densityChart"></canvas>
-
         </div>
-
         <div class="card" style="height:360px;">
-
           <h3>Decision Breakdown (GO/STOP/OFF)</h3>
-
           <canvas id="decisionChart"></canvas>
-
         </div>
-
       </div>
-
     </section>
-
-
 
     <section id="scenarios" class="container">
-
-      <h2>ðŸš¦ Scenarios</h2>
-
-      <p><strong>LED Board:</strong> <span id="scenarioMessage2">â€”</span></p>
-
-
+      <h2>🚦 Scenarios</h2>
+      <p><strong>LED Board:</strong> <span id="scenarioMessage2">—</span></p>
 
       <div class="card scenario-card">
-
         <div class="scenario-header">
-
           <h3>Vehicle Priority</h3>
-
           <div class="status-control">
-
             <span class="status-text offline" id="status2">Offline</span>
-
             <label class="switch"><input type="checkbox" onchange="toggleScenario(this)"><span class="slider"></span></label>
-
           </div>
-
         </div>
-
         <ul>
-
-          <li><strong>Pedestrian Camera:</strong> 5â€“10 students waiting</li>
-
+          <li><strong>Pedestrian Camera:</strong> 5–10 students waiting</li>
           <li><strong>Vehicle Camera:</strong> Heavy traffic 20+ Vehicles</li>
-
           <li><strong>Traffic Light:</strong> Red</li>
-
         </ul>
-
         <p><strong>YOLOv8 Action:</strong> Vehicles priority to ease congestion.<br>
-
-           LED: <em>â€œVehicles Priority â€“ Wait to Crossâ€</em></p>
-
+           LED: <em>“Vehicles Priority – Wait to Cross”</em></p>
       </div>
 
-
-
       <div class="card scenario-card">
-
         <div class="scenario-header">
-
           <h3>Pedestrian Priority</h3>
-
           <div class="status-control">
-
             <span class="status-text offline" id="status1">Offline</span>
-
             <label class="switch"><input type="checkbox" onchange="toggleScenario(this)"><span class="slider"></span></label>
-
           </div>
-
         </div>
-
         <ul>
-
           <li><strong>Pedestrian Camera:</strong> 30+ waiting</li>
-
-          <li><strong>Vehicle Camera:</strong> 0â€“5 Vehicles</li>
-
+          <li><strong>Vehicle Camera:</strong> 0–5 Vehicles</li>
           <li><strong>Traffic Light:</strong> Green</li>
-
         </ul>
-
         <p><strong>YOLOv8 Action:</strong> Prioritize pedestrians.<br>
-
-           LED: <em>â€œPrepare to Stop â€“ Pedestrians Crossingâ€</em></p>
-
+           LED: <em>“Prepare to Stop – Pedestrians Crossing”</em></p>
       </div>
-
-
 
       <div class="card scenario-card">
-
         <div class="scenario-header">
-
           <h3>Emergency Vehicle Detected</h3>
-
           <div class="status-control">
-
             <span class="status-text offline" id="status3">Offline</span>
-
             <label class="switch"><input type="checkbox" onchange="toggleScenario(this)"><span class="slider"></span></label>
-
           </div>
-
         </div>
-
         <ul>
-
           <li><strong>Pedestrian Camera:</strong> ~20 waiting</li>
-
           <li><strong>Vehicle Camera:</strong> Ambulance with siren</li>
-
-          <li><strong>Traffic Light:</strong> Yellow â†’ Red</li>
-
+          <li><strong>Traffic Light:</strong> Yellow → Red</li>
         </ul>
-
         <p><strong>YOLOv8 Action:</strong> Override for ambulance right-of-way.</p>
-
       </div>
-
     </section>
-
-
 
     <section id="logs" class="container">
-
-      <h2>ðŸ—‚ï¸ System Logs</h2>
-
+      <h2>🗂️ System Logs</h2>
       <div class="table-scroll">
-
         <table>
-
-          <thead><tr><th>Time</th><th>Event</th><th>Status</th></tr></thead>
-
+          <thead>
+            <tr><th>Time</th><th>Event</th><th>Status (Boards)</th></tr>
+          </thead>
           <tbody></tbody>
-
         </table>
-
       </div>
-
     </section>
 
-
-
-    <footer><p>Â© 2025 Adamson University | AI-Driven LED Board Optimization</p></footer>
-
+    <footer><p>© 2025 Adamson University | AI-Driven LED Board Optimization</p></footer>
   </div>
-
 </div>
 
-
-
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-
 <script>
-
   // ===== CONFIG =====
+  const BASE_URL = "http://172.20.10.3:5000";   // your Pi
 
-  const BASE_URL = "http://172.20.10.3:5000";  // your Pi
-
+  // socket (best-effort)
   let socket = null;
-
   try { socket = io(BASE_URL + "/realtime", { transports: ["websocket"] }); }
-
   catch (e) { console.warn("Socket init failed:", e); }
 
-
-
-  // ===== PAGE SWITCH / LOGIN =====
-
-  function setCamSrcs() {
-
-    const ped = document.getElementById("camPed");
-
-    const veh = document.getElementById("camVeh");
-
-    const tl  = document.getElementById("camTL");
-
-    if (ped) ped.src = BASE_URL + "/stream/ped";
-
-    if (veh) veh.src = BASE_URL + "/stream/veh";
-
-    if (tl)  tl.src  = BASE_URL + "/stream/tl";
-
-  }
-
-  function doLogin(){
-
-    const u = document.getElementById('user').value.trim();
-
-    const p = document.getElementById('pass').value.trim();
-
-    if (!u || !p) { alert("Enter any username and password for demo"); return; }
-
-    localStorage.setItem("loggedInUser", u);
-
-    showDashboard();
-
-  }
-
+  // ===== LOGIN =====
+  function doLogin(){ const u=user.value.trim(), p=pass.value.trim(); if(!u||!p){alert("Enter any username & password");return;} localStorage.setItem("loggedInUser",u); showDashboard(); }
   function logout(){ localStorage.removeItem("loggedInUser"); localStorage.removeItem("activeTab"); showLogin(); }
+  function showDashboard(){ loginPage.style.display="none"; dashboardPage.style.display="block"; setCamSrcs(); openTab(localStorage.getItem("activeTab")||"dashboard"); }
+  function showLogin(){ loginPage.style.display="flex"; dashboardPage.style.display="none"; }
+  window.addEventListener("load", () => { if(localStorage.getItem("loggedInUser")) showDashboard(); else showLogin(); });
 
-  function showDashboard(){
-
-    document.getElementById("loginPage").style.display="none";
-
-    document.getElementById("dashboardPage").style.display="block";
-
-    setCamSrcs();
-
-    openTab(localStorage.getItem("activeTab") || "dashboard");
-
+  // ===== CAMERA STREAMS + Online heartbeat =====
+  function setCamSrcs(){
+    camPed.src = BASE_URL + "/stream/ped";
+    camVeh.src = BASE_URL + "/stream/veh";
+    camTL.src  = BASE_URL + "/stream/tl";
   }
-
-  function showLogin(){
-
-    document.getElementById("loginPage").style.display="flex";
-
-    document.getElementById("dashboardPage").style.display="none";
-
-  }
-
-  window.addEventListener("load", () => {
-
-    if (localStorage.getItem("loggedInUser")) showDashboard(); else showLogin();
-
+  // simple camera "alive" heuristic: if any <img> loads in last 3s => ONLINE
+  let lastImgLoad = 0;
+  [camPed, camVeh, camTL].forEach(img=>{
+    img.addEventListener('load', ()=>{ lastImgLoad = Date.now(); setSysOnline(true); });
+    img.addEventListener('error', ()=>setSysOnline(false));
   });
+  function setSysOnline(online){
+    const el = document.getElementById("sysOnline");
+    el.textContent = online ? "ONLINE" : "OFFLINE";
+    el.classList.toggle("active", online);
+    el.classList.toggle("offline", !online);
+  }
+  setInterval(()=>{ setSysOnline(Date.now()-lastImgLoad < 3000); }, 1000);
 
-
-
-  // ===== TABS (single) =====
-
-  let densityChart, decisionChart, chartsLoaded=false;
-
-  let logsTimer=null;
-
+  // ===== TABS =====
+  let densityChart, decisionChart, chartsLoaded=false, analyticsTimer=null, logsTimer=null;
   function openTab(tabId){
-
-    document.querySelectorAll('.container').forEach(s => s.classList.remove('active'));
-
+    document.querySelectorAll('.container').forEach(s=>s.classList.remove('active'));
     document.getElementById(tabId)?.classList.add('active');
-
-    document.querySelectorAll('header nav a').forEach(a => a.classList.toggle('active', a.getAttribute('data-tab')===tabId));
-
+    document.querySelectorAll('header nav a').forEach(a=>a.classList.toggle('active', a.getAttribute('data-tab')===tabId));
     localStorage.setItem("activeTab", tabId);
 
-    if (tabId === "analytics") loadAnalytics();
+    if (tabId === "analytics") {
+      loadAnalytics();
+      if (!analyticsTimer) analyticsTimer = setInterval(loadAnalytics, 60000);   // every 1 min
+    } else { if (analyticsTimer){ clearInterval(analyticsTimer); analyticsTimer=null; } }
 
-    if (tabId === "logs") {
-
-      loadArchive(); if (!logsTimer) logsTimer = setInterval(loadArchive, 30000);
-
-    } else { if (logsTimer) { clearInterval(logsTimer); logsTimer=null; } }
-
+    if (tabId === "logs") { loadArchive(); if (!logsTimer) logsTimer=setInterval(loadArchive, 30000); }
+    else { if (logsTimer){ clearInterval(logsTimer); logsTimer=null; } }
   }
 
-
-
-  // ===== SOCKET =====
-
+  // ===== SOCKET UPDATES =====
+  function badge(el, text, on){
+    el.textContent = text;
+    el.classList.toggle("active", on);
+    el.classList.toggle("offline", !on);
+  }
   function scenarioBanner(s){
-
     const base = s.action === "GO" ? "Safe to Cross" : (s.action === "STOP" ? "Stop" : "Standby");
-
-    const map = {
-
-      scenario_1_night_ped: "Prepare to Stop â€“ Pedestrians Crossing",
-
-      scenario_2_rush_hold: "Vehicles Priority â€“ Wait to Cross",
-
-      scenario_3_emergency: "Emergency Vehicle Passing â€“ Please Wait",
-
-      baseline: base
-
-    };
-
+    const map = { scenario_1_night_ped:"Prepare to Stop – Pedestrians Crossing", scenario_2_rush_hold:"Vehicles Priority – Wait to Cross", scenario_3_emergency:"Emergency Vehicle Passing – Please Wait", baseline: base };
     return map[s.scenario || "baseline"];
-
   }
-
-
 
   if (socket){
-
     socket.on("status", (s) => {
+      // System card
+      setSysOnline(!!s.online);
+      document.getElementById("sysDecision").textContent = `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
+      document.getElementById("sysLine").innerHTML =
+        `TL: ${(s.tl_color||'').toUpperCase()} | 🚶 ${s.ped_count} | 🚗 ${s.veh_count} | Nearest: ${Number(s.nearest_vehicle_distance_m).toFixed(1)} m | `+
+        `Speed: ${Number(s.avg_vehicle_speed_mps).toFixed(1)} m/s (${(Number(s.avg_vehicle_speed_mps)*3.6).toFixed(0)} km/h)`;
 
-      const st = document.querySelector(".status");
+      // Boards & scenario
+      const text = scenarioBanner(s);
+      document.getElementById("scenarioMessage").textContent = text;
+      document.getElementById("scenarioMessage2").textContent = text;
 
-      if (st) {
+      const lb = document.getElementById("lightBadge");
+      lb.className = 'light ' + (s.tl_color||'');
+      lb.textContent = (s.tl_color||'').toUpperCase();
 
-        st.innerHTML = `
+      badge(document.getElementById("boardVeh"), `Vehicle LED: ${s.board_veh||'OFF'}`, (s.board_veh||'OFF')!=='OFF');
+      badge(document.getElementById("boardPedL"), `Ped LED (Left): ${s.board_ped_l||'OFF'}`, (s.board_ped_l||'OFF')!=='OFF');
+      badge(document.getElementById("boardPedR"), `Ped LED (Right): ${s.board_ped_r||'OFF'}`, (s.board_ped_r||'OFF')!=='OFF');
 
-          <p><strong>System Status:</strong> ${s.online ? 'ONLINE' : 'OFFLINE'}</p>
-
-          <p><strong>Current Decision:</strong> ${s.action} ${s.scenario ? "(" + s.scenario + ")" : ""}</p>
-
-          <p><strong>TL:</strong> ${(s.tl_color||'').toUpperCase()} | ðŸš¶ ${s.ped_count} | ðŸš— ${s.veh_count}
-
-             | Nearest: ${Number(s.nearest_vehicle_distance_m).toFixed(1)} m
-
-             | Speed: ${Number(s.avg_vehicle_speed_mps).toFixed(1)} m/s (${(Number(s.avg_vehicle_speed_mps)*3.6).toFixed(0)} km/h)
-
-          </p>`;
-
-      }
-
-      document.querySelector('#analytics .light')?.classList.add(s.tl_color||'');
-
-      const lightSpan = document.querySelector('#analytics .light'); if (lightSpan) lightSpan.textContent = (s.tl_color||'').toUpperCase();
-
-      const txt = scenarioBanner(s);
-
-      const a = document.getElementById("scenarioMessage"), b = document.getElementById("scenarioMessage2");
-
-      if (a) a.textContent = txt; if (b) b.textContent = txt;
-
-
-
-      document.getElementById("status1")?.classList.toggle("active",  s.scenario==="scenario_1_night_ped");
-
+      // scenario pills
+      document.getElementById("status1")?.classList.toggle("active", s.scenario==="scenario_1_night_ped");
       document.getElementById("status1")?.classList.toggle("offline", s.scenario!=="scenario_1_night_ped");
-
-      document.getElementById("status2")?.classList.toggle("active",  s.scenario==="scenario_2_rush_hold");
-
+      document.getElementById("status2")?.classList.toggle("active", s.scenario==="scenario_2_rush_hold");
       document.getElementById("status2")?.classList.toggle("offline", s.scenario!=="scenario_2_rush_hold");
-
-      document.getElementById("status3")?.classList.toggle("active",  s.scenario==="scenario_3_emergency");
-
+      document.getElementById("status3")?.classList.toggle("active", s.scenario==="scenario_3_emergency");
       document.getElementById("status3")?.classList.toggle("offline", s.scenario!=="scenario_3_emergency");
-
     });
-
   }
 
-
-
-  // ===== ANALYTICS & ARCHIVE =====
-
+  // ===== ANALYTICS =====
   async function loadAnalytics(){
-
-    if (chartsLoaded) return;
-
     try {
-
       const res = await fetch(BASE_URL + "/api/analytics");
-
       const rows = await res.json();
 
-
-
-      // fallback padding (10-minute window) so charts never look empty
-
+      // minute buckets, pad missing minutes
       const now = Date.now();
-
-      const labelSet = new Set(rows.map(r => r.minute));
-
-      const padded = [...rows];
-
+      const map = new Map(rows.map(r => [r.minute, r]));
+      const padded = [];
       for (let i=9;i>=0;i--){
-
         const d = new Date(now - i*60000);
-
         const label = d.toISOString().slice(0,16).replace('T',' ');
-
-        if (!labelSet.has(label)) padded.push({minute:label, avg_ped:0, avg_veh:0, go:0, stop:0, off:0});
-
+        const r = map.get(label) || {minute: label, avg_ped:0, avg_veh:0, go:0, stop:0, off:0};
+        padded.push(r);
       }
 
-      padded.sort((a,b)=> a.minute.localeCompare(b.minute));
+      const labels = padded.map(r => r.minute.slice(11)); // HH:MM
+      const ped = padded.map(r => r.avg_ped);
+      const veh = padded.map(r => r.avg_veh);
+      const go  = padded.map(r => r.go);
+      const stop= padded.map(r => r.stop);
+      const off = padded.map(r => r.off);
 
+      if (!densityChart){
+        densityChart = new Chart(document.getElementById('densityChart'), {
+          type: 'bar',
+          data: { labels, datasets: [{ label:'Avg Pedestrians', data: ped }, { label:'Avg Vehicles', data: veh }] },
+          options: { responsive:true, maintainAspectRatio:false }
+        });
+      } else {
+        densityChart.data.labels = labels;
+        densityChart.data.datasets[0].data = ped;
+        densityChart.data.datasets[1].data = veh;
+        densityChart.update();
+      }
 
-
-      const labels = padded.map(r=>r.minute.slice(11)); // HH:MM
-
-      const ped = padded.map(r=>r.avg_ped);
-
-      const veh = padded.map(r=>r.avg_veh);
-
-      const go  = padded.map(r=>r.go);
-
-      const stop= padded.map(r=>r.stop);
-
-      const off = padded.map(r=>r.off);
-
-
-
-      densityChart = new Chart(document.getElementById('densityChart'), {
-
-        type: 'bar',
-
-        data: { labels, datasets: [{ label:'Avg Pedestrians', data: ped }, { label:'Avg Vehicles', data: veh }] },
-
-        options: { responsive:true, maintainAspectRatio:false }
-
-      });
-
-
-
-      decisionChart = new Chart(document.getElementById('decisionChart'), {
-
-        type: 'line',
-
-        data: { labels, datasets: [{ label:'GO', data: go }, { label:'STOP', data: stop }, { label:'OFF', data: off }] },
-
-        options: { responsive:true, maintainAspectRatio:false }
-
-      });
-
-
-
-      chartsLoaded = true;
-
+      if (!decisionChart){
+        decisionChart = new Chart(document.getElementById('decisionChart'), {
+          type: 'line',
+          data: { labels, datasets: [{ label:'GO', data: go }, { label:'STOP', data: stop }, { label:'OFF', data: off }] },
+          options: { responsive:true, maintainAspectRatio:false }
+        });
+      } else {
+        decisionChart.data.labels = labels;
+        decisionChart.data.datasets[0].data = go;
+        decisionChart.data.datasets[1].data = stop;
+        decisionChart.data.datasets[2].data = off;
+        decisionChart.update();
+      }
     } catch (e) {
-
       console.error("Analytics load failed:", e);
-
     }
-
   }
 
-
-
+  // ===== ARCHIVE =====  (latest first, descending)
   async function loadArchive(limit=200){
-
     try {
-
       const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
-
-      const rows = await res.json();
-
-      const tbody = document.querySelector("#logs tbody"); if (!tbody) return;
-
+      const rows = await res.json();  // already DESC from server
+      const tbody = document.querySelector("#logs tbody");
+      if (!tbody) return;
       tbody.innerHTML = "";
-
-      rows.reverse().forEach(r=>{
-
-        const tr=document.createElement("tr");
-
-        const t=new Date(r.ts*1000).toLocaleTimeString();
-
-        tr.innerHTML=`<td>${t}</td><td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td><td>${r.action}</td>`;
-
+      rows.forEach(r => {
+        const tr = document.createElement("tr");
+        const t = new Date(r.ts * 1000).toLocaleTimeString();
+        tr.innerHTML = `
+          <td>${t}</td>
+          <td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td>
+          <td>Veh: ${r.board_veh||r.action} | Ped-L: ${r.board_ped_l||r.action} | Ped-R: ${r.board_ped_r||r.action}</td>`;
         tbody.appendChild(tr);
-
       });
-
-    } catch(e){ console.error("Archive load failed:", e); }
-
+    } catch (e) {
+      console.error("Archive load failed:", e);
+    }
   }
 
-
-
-  // UI only
-
+  // UI-only scenario toggles
   function toggleScenario(checkbox) {
-
     const statusText = checkbox.closest('.scenario-header').querySelector('.status-text');
-
     if (!statusText) return;
-
     if (checkbox.checked) { statusText.textContent="Active"; statusText.classList.remove("offline"); statusText.classList.add("active"); }
-
     else { statusText.textContent="Offline"; statusText.classList.remove("active"); statusText.classList.add("offline"); }
-
   }
-
 </script>
-
 </body>
-
 </html>
-
