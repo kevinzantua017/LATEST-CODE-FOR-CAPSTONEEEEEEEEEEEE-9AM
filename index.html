@@ -68,14 +68,14 @@
           <p id="sysLine">TL: — | 🚶 0 | 🚗 0 | Nearest: 0.0 m | Speed: 0.0 m/s (0 km/h)</p>
         </div>
 
-        <!-- Boards & Scenario -->
+        <!-- Scenario summary (no LED labels) -->
         <div class="card">
           <h3>Boards & Scenario</h3>
-          <p>Scenario: <strong id="scenarioMessage">—</strong></p>
-          <div style="display:flex; gap:10px; flex-wrap:wrap;">
-            <span class="status-text offline" id="boardVeh">Vehicle LED: OFF</span>
-            <span class="status-text offline" id="boardPedL">Ped LED (Left): OFF</span>
-            <span class="status-text offline" id="boardPedR">Ped LED (Right): OFF</span>
+          <p>Scenario: <strong id="scenarioTitle">—</strong></p>
+          <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:.5rem;">
+            <span class="status-text offline" id="pillVeh">Vehicle Priority</span>
+            <span class="status-text offline" id="pillPed">Pedestrian Priority</span>
+            <span class="status-text offline" id="pillEmg">Emergency Vehicle</span>
           </div>
           <p style="margin-top:.75rem;">Current Light: <span class="light" id="lightBadge">—</span></p>
         </div>
@@ -156,10 +156,17 @@
     <!-- Logs -->
     <section id="logs" class="container">
       <h2>🗂️ System Logs</h2>
+
+      <div style="margin: 0 0 .75rem 0; display:flex; gap:.5rem;">
+        <button onclick="deleteSelected()" class="logout-btn" style="background:#0a7;">Delete Selected</button>
+        <button onclick="clearAll()" class="logout-btn" style="background:#a00;">Clear All</button>
+      </div>
+
       <div class="table-scroll">
         <table>
           <thead>
             <tr>
+              <th><input type="checkbox" id="selAll" onchange="toggleSelectAll(this)"></th>
               <th>Time</th>
               <th>Event</th>
               <th>Status (Boards)</th>
@@ -184,7 +191,7 @@
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
   // ========= CONFIG =========
-  const BASE_URL = "http://172.20.10.3:5000";   // Flask on the Pi
+  const BASE_URL = "http://172.20.10.3:5000";
 
   // ========= LOGIN =========
   function doLogin(){
@@ -227,12 +234,12 @@
 
     if (tabId === "analytics") {
       loadAnalytics();
-      if (!analyticsTimer) analyticsTimer = setInterval(loadAnalytics, 60000); // 1 min
+      if (!analyticsTimer) analyticsTimer = setInterval(loadAnalytics, 60000);
     } else { if (analyticsTimer) { clearInterval(analyticsTimer); analyticsTimer = null; } }
 
     if (tabId === "logs") {
-      loadArchive();  // initial load
-      if (!logsTimer) logsTimer = setInterval(loadArchive, 30000); // 30s
+      loadArchive();
+      if (!logsTimer) logsTimer = setInterval(loadArchive, 30000);
     } else { if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } }
   }
 
@@ -258,7 +265,6 @@
   function renderStatus(s){
     lastStatusTs = Date.now();
 
-    // System strip
     sysDecision.textContent = `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
     sysLine.innerHTML =
       `TL: ${(s.tl_color||'').toUpperCase()} | 🚶 ${s.ped_count} | 🚗 ${s.veh_count} | `+
@@ -266,30 +272,34 @@
       `Speed: ${Number(s.avg_vehicle_speed_mps).toFixed(1)} m/s (`+
       `${(Number(s.avg_vehicle_speed_mps)*3.6).toFixed(0)} km/h)`;
 
-    // Scenario text
-    const scenMap = {
-      scenario_1_night_ped: "Prepare to Stop – Pedestrians Crossing",
+    // Scenario title mapping
+    const titleMap = {
       scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
-      scenario_3_emergency: "Emergency Vehicle Passing – Please Wait",
-      baseline: (s.action === "GO" ? "Safe to Cross" : (s.action === "STOP" ? "Stop" : "Standby"))
+      scenario_1_night_ped: "Pedestrians Priority",
+      scenario_3_emergency: "Emergency Vehicle Detected",
+      baseline: "Baseline"
     };
-    const scen = scenMap[s.scenario || "baseline"];
-    scenarioMessage.textContent = scen;
-    scenarioMessage2.textContent = scen;
+    const scenKey = s.scenario || "baseline";
+    scenarioTitle.textContent = titleMap[scenKey] || scenKey;
+
+    // Pills (Active for current scenario)
+    function pill(el, on){ el.classList.toggle("active", on); el.classList.toggle("offline", !on); }
+    pill(pillVeh, scenKey === "scenario_2_rush_hold");
+    pill(pillPed, scenKey === "scenario_1_night_ped");
+    pill(pillEmg, scenKey === "scenario_3_emergency");
 
     // Light badge
     lightBadge.className = 'light ' + (s.tl_color||'');
     lightBadge.textContent = (s.tl_color||'').toUpperCase();
 
-    // Board badges
-    function badge(el, text, on){
-      el.textContent = text;
-      el.classList.toggle("active", on);
-      el.classList.toggle("offline", !on);
-    }
-    badge(boardVeh,  `Vehicle LED: ${s.board_veh||'OFF'}`,   (s.board_veh||'OFF')!=='OFF');
-    badge(boardPedL, `Ped LED (Left): ${s.board_ped_l||'OFF'}`, (s.board_ped_l||'OFF')!=='OFF');
-    badge(boardPedR, `Ped LED (Right): ${s.board_ped_r||'OFF'}`, (s.board_ped_r||'OFF')!=='OFF');
+    // Also show scenario text in Scenarios page header
+    const scenTextMap = {
+      scenario_1_night_ped: "Prepare to Stop – Pedestrians Crossing",
+      scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
+      scenario_3_emergency: "Emergency Vehicle Passing – Please Wait",
+      baseline: (s.action === "GO" ? "Safe to Cross" : (s.action === "STOP" ? "Stop" : "Standby"))
+    };
+    scenarioMessage2.textContent = scenTextMap[scenKey];
   }
 
   let socket = null;
@@ -298,16 +308,16 @@
     socket.on("status", renderStatus);
   } catch(e){ console.warn("Socket init failed:", e); }
 
-  // Poll fallback every 2s (also helps if socket connects late)
+  // Poll fallback every 2s
   setInterval(async ()=>{
     try{
       const r = await fetch(BASE_URL + "/api/status_now", {cache: "no-store"});
       const s = await r.json();
       renderStatus(s);
-    }catch(e){ /* network down */ }
+    }catch(e){}
   }, 2000);
 
-  // ========= ANALYTICS (minute buckets) =========
+  // ========= ANALYTICS =========
   async function loadAnalytics(){
     try {
       const res = await fetch(BASE_URL + "/api/analytics");
@@ -322,7 +332,7 @@
         padded.push(byMinute.get(label) || {minute: label, avg_ped:0, avg_veh:0, go:0, stop:0, off:0});
       }
 
-      const labels = padded.map(r => r.minute.slice(11)); // HH:MM
+      const labels = padded.map(r => r.minute.slice(11));
       const ped = padded.map(r => r.avg_ped);
       const veh = padded.map(r => r.avg_veh);
       const go  = padded.map(r => r.go);
@@ -367,11 +377,38 @@
     }
   }
 
-  // ========= ARCHIVE (descending) =========
+  // ========= ARCHIVE (descending + manage) =========
+  function toggleSelectAll(cb){
+    document.querySelectorAll("#logs tbody input[type=checkbox]").forEach(x => x.checked = cb.checked);
+  }
+
+  async function deleteSelected(){
+    const ids = Array.from(document.querySelectorAll("#logs tbody input[type=checkbox]:checked"))
+      .map(cb => Number(cb.dataset.id));
+    if (!ids.length) { alert("Select at least one row."); return; }
+    if (!confirm(`Delete ${ids.length} selected row(s)?`)) return;
+    await fetch(BASE_URL + "/api/logs/delete", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ids})
+    });
+    await loadArchive();
+  }
+
+  async function clearAll(){
+    if (!confirm("Delete ALL log rows?")) return;
+    await fetch(BASE_URL + "/api/logs/clear", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({all:true})
+    });
+    await loadArchive();
+  }
+
   async function loadArchive(limit=200){
     try {
       const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
-      const rows = await res.json(); // server already returns DESC
+      const rows = await res.json(); // DESC
       const tbody = document.querySelector("#logs tbody");
       if (!tbody) return;
       tbody.innerHTML = "";
@@ -379,11 +416,14 @@
         const tr = document.createElement("tr");
         const t = new Date(r.ts * 1000).toLocaleTimeString();
         tr.innerHTML = `
+          <td><input type="checkbox" data-id="${r.id}"></td>
           <td>${t}</td>
           <td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td>
           <td>Veh: ${r.board_veh||r.action} | Ped-L: ${r.board_ped_l||r.action} | Ped-R: ${r.board_ped_r||r.action}</td>`;
         tbody.appendChild(tr);
       });
+      const master = document.getElementById("selAll");
+      if (master) master.checked = false;
     } catch (e) {
       console.error("Archive load failed:", e);
     }
@@ -420,7 +460,7 @@
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
       });
-      // server will broadcast an updated "status"
+      // server broadcasts an updated "status"
     } catch(e) {
       console.error("Failed to set scenario:", e);
     }
