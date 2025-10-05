@@ -1,19 +1,18 @@
-# app.py  (Pi I/O only) — keeps your same UI & LED, offloads YOLO/logic to cloud via MQTT
+# app.py  (Pi I/O + UI) — publishes camera frames to MQTT, receives cloud decisions,
+# keeps your same Flask-SocketIO UI and MAX7219 LED.
 
 # Import the web app FIRST so eventlet is monkey-patched before anything else.
 from flask_app import publish_frame, publish_status_from_loop, start_http_server
 
-import os, re, cv2, time, math, sqlite3, threading, json
+import os, re, cv2, time, sqlite3, threading, json, ssl
 from queue import Queue, Empty, Full
-from collections import deque
 from dataclasses import dataclass
-from typing import Dict, Tuple, List, Optional, Union
-
+from typing import Union, Optional
 import numpy as np
 import paho.mqtt.client as mqtt
 from urllib.parse import urlparse, unquote
 
-# Keep OpenCV predictable/light on Pi
+# ---- OpenCV light on Pi ----
 cv2.setNumThreads(1)
 try:
     cv2.ocl.setUseOpenCL(False)
@@ -24,30 +23,23 @@ SHOW_WINDOWS = False
 PRINT_DEBUG = True
 
 # ---------- CONFIG ----------
-# Robustness / perf toggles (kept for compatibility, some now unused)
-FALLBACK_SYNC_AFTER_S = float(os.getenv("SC_FALLBACK_SYNC_AFTER_S", "0.6"))
-
-# Frames
 FRAME_W = int(os.getenv("SC_FRAME_W", "640"))
 FRAME_H = int(os.getenv("SC_FRAME_H", "360"))
 FPS_TARGET = int(os.getenv("SC_FPS", "15"))
 FRAME_TIME = 1.0 / max(1, FPS_TARGET)
 SKIP_FRAMES = int(os.getenv("SC_SKIP", "1"))
 
-# Throttle JPEG encodes only (keeps UI smooth)
+# throttle UI JPEGs and MQTT JPEGs
 PUBLISH_HZ = float(os.getenv("SC_PUBLISH_HZ", "10"))
-_last_pub = {"ped": 0.0, "veh": 0.0, "tl": 0.0}
+_last_pub = {"ped": 0.0, "veh": 0.0, "tl": 0.0, "mqtt": 0.0}
 JPEG_QUALITY = int(os.getenv("SC_JPEG_QUALITY", "70"))
 
-# Vehicle lane helper for UI overlay
 PEDESTRIAN_LANE_Y = int(os.getenv("SC_LANE_Y", "250"))
 
-# DB + status throttling
 DB_PATH = os.getenv("SC_DB", "smart_crosswalk.db")
 LOG_EVERY_SEC = int(os.getenv("SC_LOG_SEC", "30"))
 STATUS_MIN_PERIOD = float(os.getenv("SC_STATUS_PERIOD", "0.25"))
 
-# Colors
 COLOR_GREEN  = (0,255,0)
 COLOR_RED    = (0,0,255)
 COLOR_YELLOW = (0,255,255)
@@ -61,12 +53,10 @@ def _init_led():
         from luma.led_matrix.device import max7219
         from luma.core.render import canvas
         from PIL import ImageFont
-
         serial = spi(port=0, device=0, gpio=noop())
         device = max7219(serial, cascaded=int(os.getenv("SC_LED_CASCADE","4")),
                          block_orientation=int(os.getenv("SC_LED_ORIENTATION","-90")), rotate=0)
         font = ImageFont.load_default()
-
         def show_led(msg: str):
             with canvas(device) as draw:
                 draw.text((1, -2), (msg or "")[:10], fill="white", font=font)
@@ -75,78 +65,86 @@ def _init_led():
     except Exception as e:
         if PRINT_DEBUG: print("[LED] Fallback console:", repr(e))
         return lambda msg: print("[LED]", msg)
-
 show_led = _init_led()
 
 # ---------- MQTT ----------
-SITE_ID    = os.getenv("SC_SITE_ID", "adsmn-01")
-BROKER_URL = os.getenv("SC_MQTT_URL", "mqtts://user:pass@host:8883")
+SITE_ID = os.getenv("SC_SITE_ID", "adsmn-01")
 
-u = urlparse(BROKER_URL)
-MQTT_HOST = u.hostname or "localhost"
-MQTT_PORT = u.port or (8883 if u.scheme == "mqtts" else 1883)
-MQTT_TLS  = (u.scheme == "mqtts")
-MQTT_USER = unquote(u.username) if u.username else None
-MQTT_PASS = unquote(u.password) if u.password else None
+# allow either a single URL env or separate pieces
+BROKER_URL = os.getenv("SC_MQTT_URL")  # e.g. mqtts://user:pass@host:8883
+if BROKER_URL:
+    u = urlparse(BROKER_URL)
+    MQTT_HOST = u.hostname or "localhost"
+    MQTT_PORT = u.port or (8883 if u.scheme == "mqtts" else 1883)
+    MQTT_TLS  = (u.scheme == "mqtts")
+    MQTT_USER = unquote(u.username) if u.username else None
+    MQTT_PASS = unquote(u.password) if u.password else None
+else:
+    MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
+    MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
+    MQTT_TLS  = os.getenv("MQTT_TLS", "1") == "1"
+    MQTT_USER = os.getenv("MQTT_USERNAME") or None
+    MQTT_PASS = os.getenv("MQTT_PASSWORD") or None
 
 TOPIC_PED = f"crosswalk/{SITE_ID}/frames/ped"
 TOPIC_VEH = f"crosswalk/{SITE_ID}/frames/veh"
 TOPIC_TL  = f"crosswalk/{SITE_ID}/frames/tl"
 TOPIC_DEC = f"crosswalk/{SITE_ID}/decision"
 
-# Last decision from cloud
 last_decision = {
-    "ts": 0.0,
-    "ped_count": 0,
-    "veh_count": 0,
-    "tl_color": "unknown",
-    "nearest_m": 0.0,
-    "avg_mps": 0.0,
-    "action": "OFF",
-    "scenario": "baseline",
+    "ts": 0.0, "ped_count": 0, "veh_count": 0, "tl_color": "unknown",
+    "nearest_m": 0.0, "avg_mps": 0.0, "action": "OFF", "scenario": "baseline",
 }
 
 def _to_jpeg(frame: np.ndarray) -> Optional[bytes]:
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-    if not ok: return None
-    return buf.tobytes()
-
-def on_connect(client, userdata, flags, rc):
-    print("[MQTT] Connected rc=", rc)
-    client.subscribe(TOPIC_DEC, qos=1)
+    return buf.tobytes() if ok else None
 
 def on_message(client, userdata, msg):
     global last_decision
-    if msg.topic == TOPIC_DEC:
-        try:
-            d = json.loads(msg.payload.decode("utf-8","ignore"))
-            # merge with defaults
-            for k in last_decision.keys():
-                if k in d: last_decision[k] = d[k]
-            # push into your existing UI/status path
-            publish_status_from_loop(
-                now_ts=float(last_decision.get("ts", time.time())),
-                ped_count=int(last_decision.get("ped_count",0)),
-                veh_count=int(last_decision.get("veh_count",0)),
-                tl_color=str(last_decision.get("tl_color","unknown")),
-                nearest_m=float(last_decision.get("nearest_m",0.0)),
-                avg_mps=float(last_decision.get("avg_mps",0.0)),
-                flags={"night": time.localtime().tm_hour >= 21, "rush": time.localtime().tm_hour == 7},
-                extra={"ambulance": False},
-            )
-            # Drive LED
-            show_led(str(last_decision.get("action","OFF")))
-        except Exception as e:
-            print("[MQTT] decision parse error:", repr(e))
+    if msg.topic != TOPIC_DEC:
+        return
+    try:
+        d = json.loads(msg.payload.decode("utf-8","ignore"))
+        for k in last_decision.keys():
+            if k in d: last_decision[k] = d[k]
+        publish_status_from_loop(
+            now_ts=float(last_decision.get("ts", time.time())),
+            ped_count=int(last_decision.get("ped_count",0)),
+            veh_count=int(last_decision.get("veh_count",0)),
+            tl_color=str(last_decision.get("tl_color","unknown")),
+            nearest_m=float(last_decision.get("nearest_m",0.0)),
+            avg_mps=float(last_decision.get("avg_mps",0.0)),
+            flags={"night": time.localtime().tm_hour >= 21, "rush": time.localtime().tm_hour == 7},
+            extra={"ambulance": False},
+        )
+        show_led(str(last_decision.get("action","OFF")))
+    except Exception as e:
+        print("[MQTT] decision parse error:", repr(e))
 
 def build_mqtt():
-    c = mqtt.Client(client_id=f"pi-io-{SITE_ID}", clean_session=True)
-    if MQTT_USER: c.username_pw_set(MQTT_USER, MQTT_PASS or "")
-    if MQTT_TLS:  c.tls_set()  # system CA
-    c.on_connect = on_connect
+    if not MQTT_HOST:
+        raise RuntimeError("MQTT_HOST not set")
+    c = mqtt.Client(
+        client_id=f"pi-io-{SITE_ID}",
+        clean_session=True,
+        protocol=mqtt.MQTTv311
+    )
+    if MQTT_USER:
+        c.username_pw_set(MQTT_USER, MQTT_PASS or None)
+    if MQTT_TLS:
+        c.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
+        c.tls_insecure_set(False)
+    def _on_connect(client, userdata, flags, rc, properties=None):
+        print(f"[MQTT] Connected rc={rc}")
+        client.subscribe(TOPIC_DEC, qos=1)
+    def _on_disconnect(client, userdata, rc, properties=None):
+        print(f"[MQTT] Disconnected rc={rc}")
+    c.on_connect = _on_connect
+    c.on_disconnect = _on_disconnect
     c.on_message = on_message
     c.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
-    threading.Thread(target=c.loop_forever, daemon=True).start()
+    c.loop_start()
     return c
 
 # ---------- DB ----------
@@ -174,7 +172,7 @@ def log_event(path, ts, ped_count, veh_count, tl_color, nearest_m, avg_mps, acti
     )
     con.commit(); con.close()
 
-# ---------- UTIL ----------
+# ---------- UTIL / CAMERA ----------
 def _normalize_cam(value: Union[str,int,None]):
     if value is None: return None
     if isinstance(value,int): return value
@@ -196,7 +194,6 @@ def publish_frame_throttled(key: str, frame: np.ndarray):
         publish_frame(key, frame)
         _last_pub[key] = now
 
-# ---------- CAMERA ----------
 class CameraStream:
     def __init__(self, index, width, height, fps):
         self.index, self.width, self.height, self.fps = index, width, height, fps
@@ -209,39 +206,29 @@ class CameraStream:
 
     def _open_camera(self):
         idx = _normalize_cam(self.index)
-        if isinstance(idx,int):
-            self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-            if not self.cap.isOpened(): self.cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
-            if not self.cap.isOpened(): raise RuntimeError(f"Could not open camera index {idx}")
-            pretty = f"/dev/video{idx}"
-        else:
-            self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-            if not self.cap.isOpened(): self.cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
-            if not self.cap.isOpened(): raise RuntimeError(f"Could not open camera path {idx}")
-            pretty = str(idx)
-
+        self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open camera index {idx}")
         try: self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception: pass
-
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, min(self.fps, 20))
-
         def set_fourcc(code):
             f = cv2.VideoWriter_fourcc(*code)
             self.cap.set(cv2.CAP_PROP_FOURCC, f)
             return int(self.cap.get(cv2.CAP_PROP_FOURCC)) == f
         if not set_fourcc('MJPG'):
             set_fourcc('YUYV') or set_fourcc('YUY2')
-
         self.cap.read()
-
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         f = self.cap.get(cv2.CAP_PROP_FPS)
         four = int(self.cap.get(cv2.CAP_PROP_FOURCC))
         four_s = "".join([chr((four >> 8*i) & 0xFF) for i in range(4)])
-        print(f"[OPEN] {pretty} -> {w}x{h}@{f:.1f} FOURCC={four_s}")
+        print(f"[OPEN] /dev/video{idx if isinstance(idx,int) else '?'} -> {w}x{h}@{f:.1f} FOURCC={four_s}")
 
     def _reopen_once(self):
         try: self.cap.release()
@@ -285,12 +272,12 @@ class CameraStream:
 def run_pipeline():
     init_db(DB_PATH)
 
-    # camera selection: keep your same behavior (env or auto 0/1/2)
     def pick_cameras():
         ped_env, veh_env, tl_env = os.getenv("SC_CAM_PED"), os.getenv("SC_CAM_VEH"), os.getenv("SC_CAM_TL")
         if ped_env and veh_env and tl_env:
             return _normalize_cam(ped_env), _normalize_cam(veh_env), _normalize_cam(tl_env)
-        return 0, 1, 2
+        # fallback to 0/2/4 since you confirmed those indexes
+        return 0, 2, 4
 
     i_ped, i_veh, i_tl = pick_cameras()
     cam_ped = CameraStream(i_ped, FRAME_W, FRAME_H, FPS_TARGET)
@@ -300,10 +287,8 @@ def run_pipeline():
     print(f"[Vehicle Cam]    {i_veh}")
     print(f"[Traffic Light]  {i_tl}")
 
-    # MQTT client (to publish frames & receive decision)
     mc = build_mqtt()
 
-    # Status loop timing
     last_log_ts = 0.0
     last_status_ts = 0.0
 
@@ -319,21 +304,18 @@ def run_pipeline():
             ok_veh = bool(rv and fv is not None)
             ok_tl  = bool(rt and ft is not None)
 
-            # If no frame, show black
-            blank_640x360 = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-            fp_s = fp if ok_ped else blank_640x360
-            fv_s = fv if ok_veh else blank_640x360
-            ft_s = ft if ok_tl  else blank_640x360
+            blank = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+            fp_s = fp if ok_ped else blank
+            fv_s = fv if ok_veh else blank
+            ft_s = ft if ok_tl  else blank
 
-            # simple vehicle lane overlay for context
             cv2.line(fv_s,(0,PEDESTRIAN_LANE_Y),(FRAME_W,PEDESTRIAN_LANE_Y),COLOR_YELLOW,2)
 
-            # Publish to your existing UI (same as before)
             publish_frame_throttled("ped", fp_s)
             publish_frame_throttled("veh", fv_s)
             publish_frame_throttled("tl",  ft_s)
 
-            # Publish JPEG frames to cloud (throttled)
+            # publish JPEG frames to cloud (throttled)
             now_pub = time.time()
             if now_pub - _last_pub.get("mqtt", 0.0) >= (1.0/max(1.0,PUBLISH_HZ)):
                 jb = _to_jpeg(fp_s);  jc = _to_jpeg(fv_s);  jt = _to_jpeg(ft_s)
@@ -342,7 +324,6 @@ def run_pipeline():
                 if jt is not None: mc.publish(TOPIC_TL,  jt, qos=0, retain=False)
                 _last_pub["mqtt"] = now_pub
 
-            # Show the latest decision in UI at STATUS_MIN_PERIOD cadence
             now = time.time()
             if now - last_status_ts >= STATUS_MIN_PERIOD:
                 publish_status_from_loop(
@@ -355,11 +336,9 @@ def run_pipeline():
                     flags={"night": time.localtime(now).tm_hour >= 21, "rush": time.localtime(now).tm_hour == 7},
                     extra={"ambulance": False},
                 )
-                last_status_ts = now
-                # Also keep the LED consistent with the latest cloud action
                 show_led(str(last_decision.get("action","OFF")))
+                last_status_ts = now
 
-            # DB logging at intervals (uses last decision)
             if now - last_log_ts >= LOG_EVERY_SEC:
                 log_event(
                     DB_PATH, now,
