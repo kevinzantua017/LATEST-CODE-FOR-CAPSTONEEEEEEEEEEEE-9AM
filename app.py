@@ -1,5 +1,5 @@
-# ~/Ped_Scanner/app.py
-# Keep paho on native SSL; import flask_app only after MQTT is up.
+# app.py — Raspberry Pi I/O + Dashboard
+# IMPORTANT: set this BEFORE any other imports to keep eventlet from hijacking DNS/SSL.
 import os
 os.environ.setdefault("EVENTLET_NO_GREENDNS", "YES")
 
@@ -8,13 +8,7 @@ from typing import Optional, Union
 import numpy as np
 import paho.mqtt.client as mqtt
 
-cv2.setNumThreads(1)
-try:
-    cv2.ocl.setUseOpenCL(False)
-except Exception:
-    pass
-
-# ---- Fast JPEG helper (PyTurboJPEG if available, else OpenCV) ----
+# ---------- Fast JPEG (TurboJPEG if available; else OpenCV) ----------
 try:
     from turbojpeg import TurboJPEG, TJPF_BGR
     _tj = TurboJPEG()
@@ -26,15 +20,28 @@ except Exception:
         return buf.tobytes() if ok else None
     print("[JPEG] Using OpenCV JPEG")
 
-# Placeholders until flask_app is imported later
-def publish_frame(kind, frame_bgr): pass
-def publish_status_from_loop(**kwargs): pass
-def start_http_server(*a, **k): print("[flask_app] not yet loaded")
+cv2.setNumThreads(1)
+try:
+    cv2.ocl.setUseOpenCL(False)
+except Exception:
+    pass
+
+# Placeholders until we import flask_app later.
+def _noop_publish_frame(kind, frame_bgr): pass
+def _noop_publish_status_from_loop(**kwargs): pass
+def _noop_start_http_server(*a, **k): print("[flask_app] not yet loaded")
+
+publish_frame = _noop_publish_frame
+publish_status_from_loop = _noop_publish_status_from_loop
+start_http_server = _noop_start_http_server
 
 SHOW_WINDOWS = False
+PRINT_DEBUG = True
 
 # ---------- ENV ----------
 SITE_ID  = os.getenv("SC_SITE_ID", "adsmn-01")
+
+# Camera + UI perf
 FRAME_W   = int(os.getenv("SC_FRAME_W", "640"))
 FRAME_H   = int(os.getenv("SC_FRAME_H", "360"))
 FPS       = int(os.getenv("SC_FPS", "8"))
@@ -44,12 +51,14 @@ PUBLISH_HZ  = float(os.getenv("SC_PUBLISH_HZ", "6"))
 JPEG_QUALITY= int(os.getenv("SC_JPEG_QUALITY", "60"))
 LANE_Y      = int(os.getenv("SC_LANE_Y", "250"))
 
+# MQTT split fields
 MQTT_HOST = os.getenv("MQTT_HOST")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
 MQTT_USER = os.getenv("MQTT_USERNAME")
 MQTT_PASS = os.getenv("MQTT_PASSWORD")
 MQTT_TLS  = os.getenv("MQTT_TLS", "1") == "1"
 
+# Topics
 TOPIC_PED = f"crosswalk/{SITE_ID}/frames/ped"
 TOPIC_VEH = f"crosswalk/{SITE_ID}/frames/veh"
 TOPIC_TL  = f"crosswalk/{SITE_ID}/frames/tl"
@@ -58,11 +67,14 @@ TOPIC_VPED= f"crosswalk/{SITE_ID}/viz/ped"
 TOPIC_VVEH= f"crosswalk/{SITE_ID}/viz/veh"
 TOPIC_VTL = f"crosswalk/{SITE_ID}/viz/tl"
 
+# DB
 DB_PATH = os.getenv("SC_DB", "smart_crosswalk.db")
 LOG_EVERY_SEC = int(os.getenv("SC_LOG_SEC", "30"))
 STATUS_MIN_PERIOD = float(os.getenv("SC_STATUS_PERIOD", "0.20"))
 
+# Colors
 COLOR_YELLOW=(0,255,255)
+
 _last_pub = {"mqtt": 0.0, "ui": 0.0}
 
 # ---------- LED ----------
@@ -72,21 +84,26 @@ def _init_led():
         from luma.led_matrix.device import max7219
         from luma.core.render import canvas
         from PIL import ImageFont
+
         serial = spi(port=0, device=0, gpio=noop())
         device = max7219(serial, cascaded=int(os.getenv("SC_LED_CASCADE","4")),
                          block_orientation=int(os.getenv("SC_LED_ORIENTATION","-90")), rotate=0)
         font = ImageFont.load_default()
+
         def show_led(msg: str):
-            with canvas(device) as draw: draw.text((1,-2),(msg or "")[:10],fill="white",font=font)
-        print("[LED] MAX7219 initialized"); return show_led
+            with canvas(device) as draw:
+                draw.text((1, -2), (msg or "")[:10], fill="white", font=font)
+        print("[LED] MAX7219 initialized")
+        return show_led
     except Exception as e:
         print("[LED] Fallback console:", repr(e))
         return lambda msg: print("[LED]", msg)
+
 show_led = _init_led()
 
 # ---------- MQTT (Pi) ----------
 viz_lock = threading.Lock()
-# store (image, timestamp); prefer fresh cloud viz, else local for smoothness
+# store (image, ts); prefer fresh cloud viz, else local frames for smoothness
 viz_frames = {"ped": (None, 0.0), "veh": (None, 0.0), "tl": (None, 0.0)}
 VIZ_MAX_AGE_S = 0.25
 last_decision = {
@@ -108,6 +125,7 @@ def on_message(c, u, msg):
             d = json.loads(msg.payload.decode("utf-8","ignore"))
             for k in last_decision.keys():
                 if k in d: last_decision[k] = d[k]
+            # push to UI and LED
             publish_status_from_loop(
                 now_ts=float(last_decision.get("ts", time.time())),
                 ped_count=int(last_decision.get("ped_count",0)),
@@ -122,7 +140,7 @@ def on_message(c, u, msg):
         else:
             arr = np.frombuffer(msg.payload, dtype=np.uint8)
             im  = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            now_ts = time.time()
+            now_ts = time.time()  # <-- missing before
             with viz_lock:
                 if msg.topic == TOPIC_VPED: viz_frames["ped"] = (im, now_ts)
                 elif msg.topic == TOPIC_VVEH: viz_frames["veh"] = (im, now_ts)
@@ -134,8 +152,10 @@ def build_mqtt():
     if not MQTT_HOST:
         raise RuntimeError("MQTT_HOST not set. Load env first.")
     c = mqtt.Client(client_id=f"pi-io-{SITE_ID}", clean_session=True, protocol=mqtt.MQTTv311)
-    if MQTT_USER: c.username_pw_set(MQTT_USER, MQTT_PASS or None)
+    if MQTT_USER:
+        c.username_pw_set(MQTT_USER, MQTT_PASS or None)
     if MQTT_TLS:
+        # Use system CA store; strict verification
         c.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
         c.tls_insecure_set(False)
     c.on_connect = on_connect
@@ -156,7 +176,10 @@ def _normalize_cam(value: Union[str,int,None]):
 class CameraStream:
     def __init__(self, index, width, height, fps):
         self.index, self.width, self.height, self.fps = index, width, height, fps
-        self.lock = threading.Lock(); self.frame = None; self.ret = False; self.stopped = False
+        self.lock = threading.Lock()
+        self.frame = None
+        self.ret = False
+        self.stopped = False
         self._open_camera()
         threading.Thread(target=self._update, daemon=True).start()
 
@@ -167,12 +190,15 @@ class CameraStream:
         if not self.cap.isOpened(): raise RuntimeError(f"Could not open camera index/path {idx}")
         try: self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception: pass
-        # Try MJPG first (USB-friendly); fallback to YUYV
-        try: self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        except Exception: pass
+        # Try MJPG first to reduce USB bandwidth; fall back to YUYV
+        try:
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        except Exception:
+            pass
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, min(self.fps, 20))
+
         self.cap.read()
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -187,11 +213,14 @@ class CameraStream:
         while not self.stopped:
             ret, frame = self.cap.read()
             if not ret or frame is None:
-                time.sleep(0.02); continue
+                time.sleep(0.02)
+                continue
             if frame.shape[1] != self.width or frame.shape[0] != self.height:
                 frame = cv2.resize(frame, (self.width,self.height), interpolation=cv2.INTER_AREA)
-            with self.lock: self.ret, self.frame = True, frame
-            now = time.time(); sleep_left = frame_interval - (now - last_t)
+            with self.lock:
+                self.ret, self.frame = True, frame
+            now = time.time()
+            sleep_left = frame_interval - (now - last_t)
             if sleep_left > 0: time.sleep(sleep_left)
             last_t = now
 
@@ -232,6 +261,7 @@ def log_event(path, ts, ped_count, veh_count, tl_color, nearest_m, avg_mps, acti
 # ---------- MAIN LOOP ----------
 def run_pipeline():
     init_db(DB_PATH)
+
     i_ped = int(os.getenv("SC_CAM_PED", "0"))
     i_veh = int(os.getenv("SC_CAM_VEH", "1"))
     i_tl  = int(os.getenv("SC_CAM_TL",  "2"))
@@ -248,9 +278,12 @@ def run_pipeline():
 
     while True:
         t0 = time.time()
+
+        # Acquire latest local frames
         rp, fp = cam_ped.read()
         rv, fv = cam_veh.read()
         rt, ft = cam_tl.read()
+
         ok_ped = bool(rp and fp is not None)
         ok_veh = bool(rv and fv is not None)
         ok_tl  = bool(rt and ft is not None)
@@ -260,20 +293,24 @@ def run_pipeline():
         fv_s = fv if ok_veh else blank
         ft_s = ft if ok_tl  else blank
 
+        # Try to use cloud "viz" frames if present (to show boxes)
         now_chk = time.time()
         with viz_lock:
             vp, tp = viz_frames["ped"]
             vv, tv = viz_frames["veh"]
-            vt, tt = viz_frames["tl"]
+            vt, tt = viz_frames["tl"]          # <-- your code used `t, tt` by mistake
 
-        # Prefer cloud viz only if it's fresh; else show local for smooth motion
         if vp is not None and (now_chk - tp) <= VIZ_MAX_AGE_S:
             fp_s = cv2.resize(vp, (FRAME_W, FRAME_H))
+        # else keep local fp_s
+
         if vv is not None and (now_chk - tv) <= VIZ_MAX_AGE_S:
             vv_resized = cv2.resize(vv, (FRAME_W, FRAME_H))
             cv2.line(vv_resized, (0, LANE_Y), (FRAME_W, LANE_Y), COLOR_YELLOW, 2)
             fv_s = vv_resized
-        if vt is not None and (now_chk - tt) <= VIZ_MAX_AGE_S:
+        # else keep local fv_s
+
+        if vt is not None and (now_chk - tt) <= VIZ_MAX_AGE_S:   # <-- properly indented block
             ft_s = cv2.resize(vt, (FRAME_W, FRAME_H))
 
         # Publish to dashboard (SocketIO)
@@ -325,12 +362,14 @@ def run_pipeline():
         elapsed = time.time() - t0
         if elapsed < FRAME_TIME: time.sleep(FRAME_TIME - elapsed)
 
-# Late import to avoid eventlet wrapping paho SSL
+# --- only now import the web app, to keep MQTT on native SSL ---
 def _late_import_flask_app():
     global publish_frame, publish_status_from_loop, start_http_server
     try:
         from flask_app import publish_frame as _pf, publish_status_from_loop as _ps, start_http_server as _sh
-        publish_frame = _pf; publish_status_from_loop = _ps; start_http_server = _sh
+        publish_frame = _pf
+        publish_status_from_loop = _ps
+        start_http_server = _sh
         print("[flask_app] module import completed")
     except Exception as e:
         print("[flask_app] import failed:", repr(e))
