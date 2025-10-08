@@ -2,10 +2,8 @@
 from flask_app import publish_frame, publish_status_from_loop, start_http_server
 
 import os, re, cv2, time, math, sqlite3, threading, json, ssl
-from queue import Queue
 from dataclasses import dataclass
-from typing import Union, Optional, Dict, Tuple, List
-
+from typing import Union, Optional
 import numpy as np
 import paho.mqtt.client as mqtt
 from urllib.parse import urlparse, unquote
@@ -13,9 +11,6 @@ from urllib.parse import urlparse, unquote
 cv2.setNumThreads(1)
 try: cv2.ocl.setUseOpenCL(False)
 except Exception: pass
-
-SHOW_WINDOWS = False
-PRINT_DEBUG = True
 
 # ---------- CONFIG ----------
 FRAME_W = int(os.getenv("SC_FRAME_W", "424"))
@@ -28,6 +23,7 @@ JPEG_QUALITY = int(os.getenv("SC_JPEG_QUALITY", "55"))
 _last_pub_ts = 0.0
 
 PEDESTRIAN_LANE_Y = int(os.getenv("SC_LANE_Y", "250"))
+PEDESTRIAN_LANE_Y = max(0, min(PEDESTRIAN_LANE_Y, FRAME_H-5))  # clamp
 
 DB_PATH = os.getenv("SC_DB", "smart_crosswalk.db")
 LOG_EVERY_SEC = int(os.getenv("SC_LOG_SEC", "30"))
@@ -37,7 +33,6 @@ COLOR_GREEN  = (0,255,0)
 COLOR_RED    = (0,0,255)
 COLOR_YELLOW = (0,255,255)
 COLOR_WHITE  = (255,255,255)
-COLOR_BLUE   = (255,0,0)
 
 # ---------- LED ----------
 def _init_led():
@@ -63,9 +58,8 @@ show_led = _init_led()
 
 # ---------- MQTT ----------
 SITE_ID = os.getenv("SC_SITE_ID", "adsmn-01")
-BROKER_URL = os.getenv("SC_MQTT_URL")  # optional single URL
+BROKER_URL = os.getenv("SC_MQTT_URL")
 
-# split fields (preferred)
 MQTT_HOST = os.getenv("MQTT_HOST") or (urlparse(BROKER_URL).hostname if BROKER_URL else None)
 MQTT_PORT = int(os.getenv("MQTT_PORT", urlparse(BROKER_URL).port if BROKER_URL and urlparse(BROKER_URL).port else "8883"))
 MQTT_TLS  = os.getenv("MQTT_TLS", "1") == "1" if not BROKER_URL else (urlparse(BROKER_URL).scheme == "mqtts")
@@ -78,16 +72,8 @@ TOPIC_TL  = f"crosswalk/{SITE_ID}/frames/tl"
 TOPIC_DET = f"crosswalk/{SITE_ID}/detections"
 TOPIC_DEC = f"crosswalk/{SITE_ID}/decision"
 
-latest_det = {
-    "ts": 0.0,
-    "tl_color": "unknown",
-    "ped": [],  # [x1,y1,x2,y2,conf]
-    "veh": [],  # [x1,y1,x2,y2,conf,speed_mps,dist_m]
-}
-latest_dec = {
-    "ts": 0.0, "ped_count":0, "veh_count":0, "tl_color":"unknown",
-    "nearest_m":0.0, "avg_mps":0.0, "action":"OFF", "scenario":"baseline"
-}
+latest_det = {"ts":0.0, "tl_color":"unknown", "ped":[], "veh":[]}
+latest_dec = {"ts":0.0,"ped_count":0,"veh_count":0,"tl_color":"unknown","nearest_m":0.0,"avg_mps":0.0,"action":"OFF","scenario":"baseline"}
 
 # ---------- DB ----------
 def init_db(path):
@@ -101,16 +87,17 @@ def init_db(path):
             tl_color TEXT,
             nearest_vehicle_distance_m REAL,
             avg_vehicle_speed_mps REAL,
-            action TEXT
+            action TEXT,
+            scenario TEXT
         );
     """)
     con.commit(); con.close()
 
-def log_event(path, ts, ped_count, veh_count, tl_color, nearest_m, avg_mps, action):
+def log_event(path, ts, ped_count, veh_count, tl_color, nearest_m, avg_mps, action, scenario):
     con = sqlite3.connect(path); cur = con.cursor()
     cur.execute(
-        "INSERT INTO events (ts,ped_count,veh_count,tl_color,nearest_vehicle_distance_m,avg_vehicle_speed_mps,action) VALUES (?,?,?,?,?,?,?)",
-        (ts, ped_count, veh_count, tl_color, nearest_m, avg_mps, action)
+        "INSERT INTO events (ts,ped_count,veh_count,tl_color,nearest_vehicle_distance_m,avg_vehicle_speed_mps,action,scenario) VALUES (?,?,?,?,?,?,?,?)",
+        (ts, ped_count, veh_count, tl_color, nearest_m, avg_mps, action, scenario)
     )
     con.commit(); con.close()
 
@@ -128,17 +115,17 @@ def _to_jpeg(frame: np.ndarray) -> Optional[bytes]:
     return buf.tobytes() if ok else None
 
 def draw_overlays(ped_frame: np.ndarray, veh_frame: np.ndarray, tl_frame: np.ndarray):
-    # TL label
+    # TL color
     tlc = latest_det.get("tl_color","unknown")
     cv2.putText(tl_frame, f"TL: {tlc.upper()}", (8,20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_WHITE, 2)
 
-    # Ped boxes
+    # Pedestrians
     for (x1,y1,x2,y2,cf) in latest_det.get("ped",[]):
         cv2.rectangle(ped_frame,(x1,y1),(x2,y2),COLOR_GREEN,2)
         cv2.putText(ped_frame, f"person {cf:.2f}", (x1,max(12,y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_GREEN,1)
     cv2.putText(ped_frame, f"Pedestrians: {len(latest_det.get('ped',[]))}", (8,20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_WHITE, 2)
 
-    # Veh boxes + lane + speed/dist
+    # Vehicles
     cv2.line(veh_frame,(0,PEDESTRIAN_LANE_Y),(FRAME_W,PEDESTRIAN_LANE_Y),COLOR_YELLOW,2)
     nearest = float('inf'); speeds=[]
     for (x1,y1,x2,y2,cf,spd,dist) in latest_det.get("veh",[]):
@@ -167,24 +154,21 @@ class CameraStream:
         cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
         if not cap.isOpened(): cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
         if not cap.isOpened(): raise RuntimeError(f"Could not open camera index/path {idx}")
-
         try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception: pass
-
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  # fast if supported
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         cap.set(cv2.CAP_PROP_FPS, min(self.fps, 15))
         self.cap = cap
 
-        # prime
         self.cap.read()
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         f = self.cap.get(cv2.CAP_PROP_FPS)
         four = int(self.cap.get(cv2.CAP_PROP_FOURCC))
         four_s = "".join([chr((four >> 8*i) & 0xFF) for i in range(4)])
-        print(f"[OPEN] /dev/video{idx if isinstance(idx,int) else idx} -> {w}x{h}@{f:.1f} FOURCC={four_s}")
+        print(f"[OPEN] {idx} -> {w}x{h}@{f:.1f} FOURCC={four_s}")
 
     def _update(self):
         frame_interval = 1.0 / max(1,self.fps)
@@ -229,7 +213,6 @@ def on_message(c, u, msg):
             }
         elif msg.topic == TOPIC_DEC:
             latest_dec.update(payload)
-            # reflect on UI + LED
             publish_status_from_loop(
                 now_ts=float(latest_dec.get("ts", time.time())),
                 ped_count=int(latest_dec.get("ped_count",0)),
@@ -263,7 +246,6 @@ def build_mqtt():
 def run_pipeline():
     init_db(DB_PATH)
 
-    # choose cameras (0/2/4 by your setup)
     i_ped = int(os.getenv("SC_CAM_PED", "0"))
     i_veh = int(os.getenv("SC_CAM_VEH", "2"))
     i_tl  = int(os.getenv("SC_CAM_TL",  "4"))
@@ -282,33 +264,36 @@ def run_pipeline():
 
     while True:
         loop_t = time.time()
-        rp, fp = cam_ped.read()
-        rv, fv = cam_veh.read()
-        rt, ft = cam_tl.read()
+        rp, fp_raw = cam_ped.read()
+        rv, fv_raw = cam_veh.read()
+        rt, ft_raw = cam_tl.read()
 
-        if not rp: fp = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-        if not rv: fv = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-        if not rt: ft = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        # blanks if missing
+        blank = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        if not rp: fp_raw = blank
+        if not rv: fv_raw = blank
+        if not rt: ft_raw = blank
 
-        # draw cloud overlays into the frames we show
-        draw_overlays(fp, fv, ft)
-
-        # publish frames to the browser UI (throttled inside publish_frame)
-        publish_frame("ped", fp)
-        publish_frame("veh", fv)
-        publish_frame("tl",  ft)
-
-        # publish JPEG frames to the VM (throttled)
+        # 1) send RAW frames to cloud
         global _last_pub_ts
         now_pub = time.time()
         if (now_pub - _last_pub_ts) >= (1.0/max(1.0, PUBLISH_HZ)):
-            jb = _to_jpeg(fp); jc = _to_jpeg(fv); jt = _to_jpeg(ft)
+            jb = _to_jpeg(fp_raw); jc = _to_jpeg(fv_raw); jt = _to_jpeg(ft_raw)
             if jb is not None: mc.publish(TOPIC_PED, jb, qos=0, retain=False)
             if jc is not None: mc.publish(TOPIC_VEH, jc, qos=0, retain=False)
             if jt is not None: mc.publish(TOPIC_TL,  jt, qos=0, retain=False)
             _last_pub_ts = now_pub
 
-        # mirror decision to status bar at UI cadence
+        # 2) overlay for dashboard
+        fp = fp_raw.copy(); fv = fv_raw.copy(); ft = ft_raw.copy()
+        draw_overlays(fp, fv, ft)
+
+        # 3) publish overlays to dashboard
+        publish_frame("ped", fp)
+        publish_frame("veh", fv)
+        publish_frame("tl",  ft)
+
+        # 4) status + DB
         now = time.time()
         if now - last_status_ts >= STATUS_MIN_PERIOD:
             publish_status_from_loop(
@@ -324,7 +309,6 @@ def run_pipeline():
             show_led(str(latest_dec.get("action","OFF")))
             last_status_ts = now
 
-        # DB logging for archive/analytics
         if now - last_log_ts >= LOG_EVERY_SEC:
             log_event(
                 DB_PATH, now,
@@ -334,14 +318,10 @@ def run_pipeline():
                 float(latest_dec.get("nearest_m",0.0)),
                 float(latest_dec.get("avg_mps",0.0)),
                 str(latest_dec.get("action","OFF")),
+                str(latest_dec.get("scenario","baseline")),
             )
             last_log_ts = now
 
-        if SHOW_WINDOWS:
-            cv2.imshow("Ped", fp); cv2.imshow("Veh", fv); cv2.imshow("TL", ft)
-            if (cv2.waitKey(1)&0xFF)==27: break
-
-        # pace the loop to camera FPS
         elapsed = time.time() - loop_t
         if elapsed < FRAME_TIME: time.sleep(FRAME_TIME - elapsed)
 
