@@ -1,399 +1,393 @@
-#!/usr/bin/env python3
-# flask_app.py — dashboard server: MJPEG streaming + Socket.IO status
-# This file is safe to import after MQTT is set up in app.py (to avoid eventlet wrapping paho SSL).
-
-import eventlet
-eventlet.monkey_patch()  # MUST be first in this module
-
+# app.py â€” Raspberry Pi I/O + Dashboard
+# IMPORTANT: set this BEFORE any other imports to keep eventlet from hijacking DNS/SSL.
 import os
-import time
-import threading
-from typing import Dict, Optional, Tuple, List
+os.environ.setdefault("EVENTLET_NO_GREENDNS", "YES")
 
-import cv2
+# ---- postpone importing flask_app until AFTER MQTT is built (see bottom) ----
+# from flask_app import publish_frame, publish_status_from_loop, start_http_server
+
+import re, cv2, time, sqlite3, threading, json, ssl
+from typing import Optional, Union
 import numpy as np
-from flask import Flask, Response, jsonify, request, send_from_directory, make_response
-from flask_cors import CORS
-from flask_socketio import SocketIO
+import paho.mqtt.client as mqtt
+try:
+    from turbojpeg import TurboJPEG, TJPF_BGR
+    _tj = TurboJPEG()
+    def fast_jpeg(bgr, q=60):
+        return _tj.encode(bgr, quality=int(q), pixel_format=TJPF_BGR)
+    _jpeg = fast_jpeg
+    print("[JPEG] Using turbojpeg")
+except Exception:
+    def _cv2_jpeg(bgr, q=60):
+        ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), int(q)])
+        return buf.tobytes() if ok else None
+    _jpeg = _cv2_jpeg
+    print("[JPEG] Using OpenCV JPEG")
+cv2.setNumThreads(1)
+try:
+    cv2.ocl.setUseOpenCL(False)
+except Exception:
+    pass
 
-print("[flask_app] module import starting...")
+# Placeholders: will be replaced after we import flask_app later.
+def _noop_publish_frame(kind, frame_bgr): pass
+def _noop_publish_status_from_loop(**kwargs): pass
+def _noop_start_http_server(*a, **k): print("[flask_app] not yet loaded")
 
-# --------------------- CONFIG ---------------------
+publish_frame = _noop_publish_frame
+publish_status_from_loop = _noop_publish_status_from_loop
+start_http_server = _noop_start_http_server
+
+SHOW_WINDOWS = False
+PRINT_DEBUG = True
+
+# ---------- ENV ----------
+SITE_ID  = os.getenv("SC_SITE_ID", "adsmn-01")
+
+# Camera + UI perf
+FRAME_W   = int(os.getenv("SC_FRAME_W", "640"))
+FRAME_H   = int(os.getenv("SC_FRAME_H", "360"))
+FPS       = int(os.getenv("SC_FPS", "8"))
+FRAME_TIME = 1.0 / max(1, FPS)
+SKIP_FRAMES = int(os.getenv("SC_SKIP", "1"))
+PUBLISH_HZ  = float(os.getenv("SC_PUBLISH_HZ", "6"))
+JPEG_QUALITY= int(os.getenv("SC_JPEG_QUALITY", "60"))
+
+LANE_Y      = int(os.getenv("SC_LANE_Y", "250"))
+
+# MQTT split fields
+MQTT_HOST = os.getenv("MQTT_HOST")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
+MQTT_USER = os.getenv("MQTT_USERNAME")
+MQTT_PASS = os.getenv("MQTT_PASSWORD")
+MQTT_TLS  = os.getenv("MQTT_TLS", "1") == "1"
+
+# Topics
+TOPIC_PED = f"crosswalk/{SITE_ID}/frames/ped"
+TOPIC_VEH = f"crosswalk/{SITE_ID}/frames/veh"
+TOPIC_TL  = f"crosswalk/{SITE_ID}/frames/tl"
+TOPIC_DEC = f"crosswalk/{SITE_ID}/decision"
+TOPIC_VPED= f"crosswalk/{SITE_ID}/viz/ped"
+TOPIC_VVEH= f"crosswalk/{SITE_ID}/viz/veh"
+TOPIC_VTL = f"crosswalk/{SITE_ID}/viz/tl"
+
+# DB
 DB_PATH = os.getenv("SC_DB", "smart_crosswalk.db")
-JPEG_QUALITY = int(os.getenv("SC_JPEG_QUALITY", "70"))     # lower = smaller, faster
-DB_TAIL_INTERVAL_S = float(os.getenv("SC_DB_TAIL_INTERVAL", "0.5"))
-DEFAULT_STREAM_FPS = float(os.getenv("SC_PUBLISH_HZ", "12"))
+LOG_EVERY_SEC = int(os.getenv("SC_LOG_SEC", "30"))
+STATUS_MIN_PERIOD = float(os.getenv("SC_STATUS_PERIOD", "0.20"))
 
-# --------------------- SHARED STATE ---------------------
-latest_frames: Dict[str, Optional[np.ndarray]] = {"ped": None, "veh": None, "tl": None}
-latest_jpegs:  Dict[str, Optional[bytes]]     = {"ped": None, "veh": None, "tl": None}
+# Colors
+COLOR_YELLOW=(0,255,255)
 
-# Current board & scenario state (controlled by /api/set_scenario)
-board_state = {
-    "board_veh": "OFF",      # "ON" or "OFF"
-    "board_ped_l": "OFF",
-    "board_ped_r": "OFF",
-    "scenario": "baseline"   # baseline | scenario_1_night_ped | scenario_2_rush_hold | scenario_3_emergency
+_last_pub = {"mqtt": 0.0, "ui": 0.0}
+
+# ---------- LED ----------
+def _init_led():
+    try:
+        from luma.core.interface.serial import spi, noop
+        from luma.led_matrix.device import max7219
+        from luma.core.render import canvas
+        from PIL import ImageFont
+
+        serial = spi(port=0, device=0, gpio=noop())
+        device = max7219(serial, cascaded=int(os.getenv("SC_LED_CASCADE","4")),
+                         block_orientation=int(os.getenv("SC_LED_ORIENTATION","-90")), rotate=0)
+        font = ImageFont.load_default()
+
+        def show_led(msg: str):
+            with canvas(device) as draw:
+                draw.text((1, -2), (msg or "")[:10], fill="white", font=font)
+        print("[LED] MAX7219 initialized")
+        return show_led
+    except Exception as e:
+        print("[LED] Fallback console:", repr(e))
+        return lambda msg: print("[LED]", msg)
+
+show_led = _init_led()
+
+# ---------- MQTT (Pi) ----------
+viz_lock = threading.Lock()
+viz_frames = {"ped": (None, 0.0), "veh": (None, 0.0), "tl": (None, 0.0)}
+VIZ_MAX_AGE_S = 0.25 
+last_decision = {
+    "ts": 0.0, "ped_count": 0, "veh_count": 0, "tl_color": "unknown",
+    "nearest_m": 0.0, "avg_mps": 0.0, "action": "OFF", "scenario": "baseline"
 }
 
-latest_status = {
-    "ts": 0.0,
-    "ped_count": 0,
-    "veh_count": 0,
-    "tl_color": "unknown",
-    "nearest_vehicle_distance_m": 0.0,
-    "avg_vehicle_speed_mps": 0.0,
-    "action": "OFF",
-    "scenario": "baseline",
-    # still tracked for logs
-    "board_veh": "OFF",
-    "board_ped_l": "OFF",
-    "board_ped_r": "OFF",
-}
+def _to_jpeg(img: np.ndarray) -> Optional[bytes]:
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+    return buf.tobytes() if ok else None
 
-_state_lock = threading.Lock()
+def on_connect(c, u, f, rc, p=None):
+    print(f"[MQTT] Connected rc={rc}")
+    c.subscribe([(TOPIC_DEC,1), (TOPIC_VPED,0), (TOPIC_VVEH,0), (TOPIC_VTL,0)])
 
-# --------------------- APP / SOCKET ---------------------
-# Serve your static site from ./static (index.html, style.css, images, etc.)
-app = Flask(__name__, static_folder="static", static_url_path="")
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+def on_message(c, u, msg):
+    global last_decision, viz_frames
+    try:
+        if msg.topic == TOPIC_DEC:
+            d = json.loads(msg.payload.decode("utf-8","ignore"))
+            for k in last_decision.keys():
+                if k in d: last_decision[k] = d[k]
+            # push to UI and LED
+            publish_status_from_loop(
+                now_ts=float(last_decision.get("ts", time.time())),
+                ped_count=int(last_decision.get("ped_count",0)),
+                veh_count=int(last_decision.get("veh_count",0)),
+                tl_color=str(last_decision.get("tl_color","unknown")),
+                nearest_m=float(last_decision.get("nearest_m",0.0)),
+                avg_mps=float(last_decision.get("avg_mps",0.0)),
+                flags={"night": time.localtime().tm_hour>=21, "rush": time.localtime().tm_hour==7},
+                extra={"ambulance": False},
+            )
+            show_led(str(last_decision.get("action","OFF")))
+        else:
+            arr = np.frombuffer(msg.payload, dtype=np.uint8)
+            im  = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            with viz_lock:
+                 if msg.topic == TOPIC_VPED: viz_frames["ped"] = (im, now_ts)
+                 elif msg.topic == TOPIC_VVEH: viz_frames["veh"] = (im, now_ts)
+                 elif msg.topic == TOPIC_VTL:  viz_frames["tl"]  = (im, now_ts)
+    except Exception as e:
+        print("[MQTT] on_message error:", repr(e))
 
-# eventlet async mode fits our Pi setup
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+def build_mqtt():
+    if not MQTT_HOST:
+        raise RuntimeError("MQTT_HOST not set. Load env first.")
+    c = mqtt.Client(client_id=f"pi-io-{SITE_ID}", clean_session=True, protocol=mqtt.MQTTv311)
+    if MQTT_USER:
+        c.username_pw_set(MQTT_USER, MQTT_PASS or None)
+    if MQTT_TLS:
+        # Use system CA store; strict verification
+        c.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
+        c.tls_insecure_set(False)
+    c.on_connect = on_connect
+    c.on_message = on_message
+    # Start network loop BEFORE or IMMEDIATELY after connect; both are OK with native sockets
+    c.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
+    c.loop_start()
+    return c
 
-@app.get("/")
-def root_index():
-    # Serve /static/index.html as the dashboard
-    index_path = os.path.join(app.static_folder, "index.html")
-    if os.path.exists(index_path):
-        return send_from_directory(app.static_folder, "index.html")
-    return make_response("Place your index.html in ./static/", 200)
+# ---------- Cameras ----------
+def _normalize_cam(value: Union[str,int,None]):
+    if value is None: return None
+    if isinstance(value,int): return value
+    s = str(value).strip()
+    if s.isdigit(): return int(s)
+    m = re.match(r"^/dev/video(\d+)$", s)
+    return int(m.group(1)) if m else s
 
-# Optional favicon (avoid 404s)
-@app.get("/favicon.ico")
-def favicon():
-    ico = os.path.join(app.static_folder, "favicon.ico")
-    if os.path.exists(ico):
-        return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/vnd.microsoft.icon")
-    png = os.path.join(app.static_folder, "images", "Adamson.png")
-    if os.path.exists(png):
-        return send_from_directory(os.path.dirname(png), "Adamson.png", mimetype="image/png")
-    return ("", 204)
+class CameraStream:
+    def __init__(self, index, width, height, fps):
+        self.index, self.width, self.height, self.fps = index, width, height, fps
+        self.lock = threading.Lock()
+        self.frame = None
+        self.ret = False
+        self.stopped = False
+        self._open_camera()
+        threading.Thread(target=self._update, daemon=True).start()
 
-@app.after_request
-def _nocache(resp):
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
-    resp.headers["Expires"] = "0"
-    return resp
+    def _open_camera(self):
+        idx = _normalize_cam(self.index)
+        self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+        if not self.cap.isOpened(): self.cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
+        if not self.cap.isOpened(): raise RuntimeError(f"Could not open camera index/path {idx}")
+        try: self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception: pass
+        # Try MJPG first to reduce USB bandwidth; fall back to YUYV
+        try:
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        except Exception:
+            pass
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, min(self.fps, 20))
+        # If MJPG didnâ€™t take, try YUYV
+        four = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        four_s = "".join([chr((four >> 8*i) & 0xFF) for i in range(4)])
+        if four_s.strip("\x00") not in ("MJPG",):
+            try:
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
+            except Exception:
+                pass
 
-# --------------------- DECISION/SCENARIO (UI fallback) ---------------------
-def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
-                    tl_color: str, flags: Dict[str, bool]) -> Tuple[str, str]:
-    # emergency flag always overrides
-    if flags.get("ambulance", False):
-        return ("STOP", "scenario_3_emergency")
-    # simple heuristics for demo
-    if flags.get("night", False) and ped_count >= 30 and veh_count <= 2 and tl_color == "green":
-        return ("STOP", "scenario_1_night_ped")
-    if flags.get("rush", False) and (5 <= ped_count <= 10) and veh_count >= 20 and tl_color == "red":
-        return ("OFF", "scenario_2_rush_hold")
-    # baseline
-    action = "OFF"
-    if tl_color == "red":
-        action = "STOP"
-    elif tl_color == "green":
-        if ped_count > 0 and veh_count > 0:
-            action = "STOP"
-        elif ped_count > 0:
-            action = "GO"
-    elif tl_color == "yellow":
-        action = "STOP" if ped_count > 0 else "OFF"
-    else:
-        if ped_count > 0 and veh_count > 0:
-            action = "STOP"
-        elif ped_count > 0:
-            action = "GO"
-    return (action, "baseline")
+        self.cap.read()
+        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        f = self.cap.get(cv2.CAP_PROP_FPS)
+        four = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        four_s = "".join([chr((four >> 8*i) & 0xFF) for i in range(4)])
+        print(f"[OPEN] {idx} -> {w}x{h}@{f:.1f} FOURCC={four_s}")
 
-# --------------------- MJPEG STREAMING ---------------------
-def mjpeg_stream(key: str, fps_limit: float):
-    """
-    Multipart MJPEG generator with Content-Length per part and a stable boundary.
-    Works smoothly in all modern browsers.
-    """
-    boundary_name = "frame"          # must match the Response boundary below
-    boundary = ("--" + boundary_name).encode("ascii")
-    min_interval = 1.0 / max(1.0, fps_limit)
+    def _update(self):
+        frame_interval = 1.0 / max(1,self.fps)
+        last_t = 0.0
+        while not self.stopped:
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                time.sleep(0.02)
+                continue
+            if frame.shape[1] != self.width or frame.shape[0] != self.height:
+                frame = cv2.resize(frame, (self.width,self.height), interpolation=cv2.INTER_AREA)
+            with self.lock:
+                self.ret, self.frame = True, frame
+            now = time.time()
+            sleep_left = frame_interval - (now - last_t)
+            if sleep_left > 0: time.sleep(sleep_left)
+            last_t = now
+
+    def read(self):
+        with self.lock:
+            return self.ret, None if self.frame is None else self.frame.copy()
+
+    def stop(self):
+        self.stopped = True
+        try: self.cap.release()
+        except Exception: pass
+
+# ---------- DB ----------
+def init_db(path):
+    con = sqlite3.connect(path); cur = con.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            ped_count INTEGER,
+            veh_count INTEGER,
+            tl_color TEXT,
+            nearest_vehicle_distance_m REAL,
+            avg_vehicle_speed_mps REAL,
+            action TEXT
+        );
+    """)
+    con.commit(); con.close()
+
+def log_event(path, ts, ped_count, veh_count, tl_color, nearest_m, avg_mps, action):
+    con = sqlite3.connect(path); cur = con.cursor()
+    cur.execute(
+        "INSERT INTO events (ts,ped_count,veh_count,tl_color,nearest_vehicle_distance_m,avg_vehicle_speed_mps,action) VALUES (?,?,?,?,?,?,?)",
+        (ts, ped_count, veh_count, tl_color, nearest_m, avg_mps, action)
+    )
+    con.commit(); con.close()
+
+# ---------- MAIN LOOP ----------
+def run_pipeline():
+    init_db(DB_PATH)
+
+    i_ped = int(os.getenv("SC_CAM_PED", "0"))
+    i_veh = int(os.getenv("SC_CAM_VEH", "1"))
+    i_tl  = int(os.getenv("SC_CAM_TL",  "2"))
+    cam_ped = CameraStream(i_ped, FRAME_W, FRAME_H, FPS)
+    cam_veh = CameraStream(i_veh, FRAME_W, FRAME_H, FPS)
+    cam_tl  = CameraStream(i_tl,  FRAME_W, FRAME_H, FPS)
+    print(f"[Pedestrian Cam] {i_ped}")
+    print(f"[Vehicle Cam]    {i_veh}")
+    print(f"[Traffic Light]  {i_tl}")
+
+    mc = build_mqtt()
+    last_status_ts = 0.0
+    last_log_ts = 0.0
 
     while True:
         t0 = time.time()
-        with _state_lock:
-            jpg = latest_jpegs.get(key)
 
-        if jpg is None:
-            # yield a tiny black frame until the first image arrives
-            black = np.zeros((240, 424, 3), np.uint8)
-            ok, buf = cv2.imencode(".jpg", black, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-            jpg = buf.tobytes() if ok else None
-            if jpg is None:
-                eventlet.sleep(0.05)
-                continue
+        # Acquire latest local frames
+        rp, fp = cam_ped.read()
+        rv, fv = cam_veh.read()
+        rt, ft = cam_tl.read()
 
-        yield (
-            boundary + b"\r\n"
-            b"Content-Type: image/jpeg\r\n" +
-            f"Content-Length: {len(jpg)}\r\n\r\n".encode("ascii") +
-            jpg + b"\r\n"
-        )
+        ok_ped = bool(rp and fp is not None)
+        ok_veh = bool(rv and fv is not None)
+        ok_tl  = bool(rt and ft is not None)
 
-        dt = time.time() - t0
-        if dt < min_interval:
-            eventlet.sleep(min_interval - dt)
+        blank = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        fp_s = fp if ok_ped else blank
+        fv_s = fv if ok_veh else blank
+        ft_s = ft if ok_tl  else blank
 
-@app.get("/stream/<cam>")
-def stream_cam(cam: str):
-    if cam not in ("ped", "veh", "tl"):
-        return "unknown cam", 404
-    # boundary must match the one inside mjpeg_stream()
-    return Response(
-        mjpeg_stream(cam, fps_limit=DEFAULT_STREAM_FPS),
-        mimetype="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
-    )
+        # Try to use cloud "viz" frames if present (to show boxes)
+        now_chk = time.time()
+        with viz_lock:
+            vp, tp = viz_frames["ped"]
+            vv, tv = viz_frames["veh"]
+            t, tt = viz_frames["tl"]
 
-# --------------------- DB HELPERS ---------------------
-import sqlite3
+        if vp is not None and (now_chk - tp) <= VIZ_MAX_AGE_S:
+            fp_s = cv2.resize(vp, (FRAME_W, FRAME_H))
+# else keep local fp_s
 
-def _db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=3.0, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=3000;")
-    return conn
+        if vv is not None and (now_chk - tv) <= VIZ_MAX_AGE_S:
+            vv_resized = cv2.resize(vv, (FRAME_W, FRAME_H))
+            cv2.line(vv_resized, (0, LANE_Y), (FRAME_W, LANE_Y), COLOR_YELLOW, 2)
+            fv_s = vv_resized
+# else keep local fv_s
 
-def _safe_query_rows(sql: str, args=()):
-    try:
-        conn = _db_connect()
-        cur = conn.cursor()
-        cur.execute(sql, args)
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except sqlite3.OperationalError as e:
-        if "no such table" in str(e).lower():
-            return []
-        raise
+if vt is not None and (now_chk - tt) <= VIZ_MAX_AGE_S:
+    ft_s = cv2.resize(vt, (FRAME_W, FRAME_H))
 
-# --------------------- REST APIs ---------------------
-@app.get("/api/health")
-def api_health():
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=1.0)
-        conn.execute("PRAGMA user_version;")
-        conn.close()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "msg": repr(e)}), 500
+        # Publish to dashboard (SocketIO)
+        now_ui = time.time()
+        if now_ui - _last_pub["ui"] >= (1.0 / max(1.0, PUBLISH_HZ)):
+            publish_frame("ped", fp_s)
+            publish_frame("veh", fv_s)
+            publish_frame("tl",  ft_s)
+            _last_pub["ui"] = now_ui
 
-@app.get("/api/status")
-def api_status():
-    with _state_lock:
-        return jsonify(latest_status)
+        # Publish JPEG frames to cloud (raw) â€” throttled
+        now_mq = time.time()
+        if now_mq - _last_pub["mqtt"] >= (1.0 / max(1.0, PUBLISH_HZ)):
+            jb = _to_jpeg(fp_s);  jc = _to_jpeg(fv_s);  jt = _to_jpeg(ft_s)
+            if jb is not None: mc.publish(TOPIC_PED, jb, qos=0, retain=False)
+            if jc is not None: mc.publish(TOPIC_VEH, jc, qos=0, retain=False)
+            if jt is not None: mc.publish(TOPIC_TL,  jt, qos=0, retain=False)
+            _last_pub["mqtt"] = now_mq
 
-@app.get("/api/status_now")
-def api_status_now():
-    # Poll fallback the dashboard uses alongside Socket.IO
-    with _state_lock:
-        return jsonify(latest_status)
-
-@app.get("/api/logs")
-def api_logs():
-    limit = int(request.args.get("limit", 100))
-    rows = _safe_query_rows(
-        """
-        SELECT id, ts, ped_count, veh_count, tl_color,
-               nearest_vehicle_distance_m, avg_vehicle_speed_mps, action
-        FROM events
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    with _state_lock:
-        bveh = latest_status.get("board_veh", "OFF")
-        pl   = latest_status.get("board_ped_l", "OFF")
-        pr   = latest_status.get("board_ped_r", "OFF")
-    return jsonify([
-        {
-            "id": int(r[0]),
-            "ts": float(r[1]),
-            "ped_count": int(r[2]),
-            "veh_count": int(r[3]),
-            "tl_color": str(r[4]),
-            "nearest_vehicle_distance_m": float(r[5]),
-            "avg_vehicle_speed_mps": float(r[6]),
-            "action": str(r[7]),
-            "board_veh": bveh,
-            "board_ped_l": pl,
-            "board_ped_r": pr,
-        }
-        for r in rows
-    ])
-
-@app.get("/api/analytics")
-def api_analytics():
-    # minute-level aggregates for last 60 minutes
-    rows = _safe_query_rows(
-        """
-        SELECT strftime('%Y-%m-%d %H:%M', ts, 'unixepoch') AS minute,
-               AVG(ped_count), AVG(veh_count),
-               SUM(action='GO'), SUM(action='STOP'), SUM(action='OFF')
-        FROM events
-        WHERE ts >= strftime('%s','now','-60 minutes')
-        GROUP BY minute
-        ORDER BY minute ASC
-        """
-    )
-    return jsonify([
-        {
-            "minute": m,
-            "avg_ped": float(p or 0),
-            "avg_veh": float(v or 0),
-            "go": int(go or 0),
-            "stop": int(st or 0),
-            "off": int(off or 0),
-        }
-        for (m, p, v, go, st, off) in rows
-    ])
-
-@app.post("/api/set_scenario")
-def api_set_scenario():
-    """Set current scenario name and/or board LED states from the Scenarios tab."""
-    data = request.get_json(silent=True) or {}
-    name = data.get("scenario")     # optional string
-    veh  = data.get("board_veh")    # "ON"/"OFF" optional
-    pl   = data.get("board_ped_l")  # "ON"/"OFF" optional
-    pr   = data.get("board_ped_r")  # "ON"/"OFF" optional
-    with _state_lock:
-        if isinstance(name, str) and name:
-            board_state["scenario"] = name
-            latest_status["scenario"] = name
-        for k, v in (("board_veh",veh), ("board_ped_l",pl), ("board_ped_r",pr)):
-            if v in ("ON","OFF"):
-                board_state[k] = v
-                latest_status[k] = v
-    socketio.emit("status", latest_status, namespace="/realtime")
-    return jsonify({"ok": True, "state": {**board_state}})
-
-@app.post("/api/logs/delete")
-def api_logs_delete():
-    data = request.get_json(silent=True) or {}
-    ids: List[int] = data.get("ids") or []
-    if not ids:
-        return jsonify({"ok": False, "msg": "no ids"}), 400
-    placeholders = ",".join("?" for _ in ids)
-    conn = _db_connect()
-    cur = conn.cursor()
-    cur.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "deleted": int(deleted)})
-
-@app.post("/api/logs/clear")
-def api_logs_clear():
-    data = request.get_json(silent=True) or {}
-    all_flag = bool(data.get("all"))
-    older_than = data.get("older_than_seconds")  # optional
-    conn = _db_connect()
-    cur = conn.cursor()
-    if all_flag:
-        cur.execute("DELETE FROM events")
-    elif older_than is not None:
-        cur.execute("DELETE FROM events WHERE ts < strftime('%s','now') - ?", (int(older_than),))
-    else:
-        return jsonify({"ok": False, "msg": "provide {all:true} or older_than_seconds"}), 400
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "deleted": int(deleted)})
-
-# --------------------- realtime emits ---------------------
-def tail_db_emit():
-    print("[flask_app] DB tailer started")
-    last_id = 0
-    while True:
-        try:
-            rows = _safe_query_rows(
-                """
-                SELECT id, ts, ped_count, veh_count, tl_color,
-                       nearest_vehicle_distance_m, avg_vehicle_speed_mps, action
-                FROM events
-                ORDER BY id DESC LIMIT 1
-                """
+        # Periodic status + LED synced to cloud decision
+        now = time.time()
+        if now - last_status_ts >= STATUS_MIN_PERIOD:
+            publish_status_from_loop(
+                now_ts=now,
+                ped_count=int(last_decision.get("ped_count",0)),
+                veh_count=int(last_decision.get("veh_count",0)),
+                tl_color=str(last_decision.get("tl_color","unknown")),
+                nearest_m=float(last_decision.get("nearest_m",0.0)),
+                avg_mps=float(last_decision.get("avg_mps",0.0)),
+                flags={"night": time.localtime(now).tm_hour>=21, "rush": time.localtime(now).tm_hour==7},
+                extra={"ambulance": False},
             )
-            if rows:
-                row = rows[0]
-                if row[0] != last_id:
-                    last_id = row[0]
-                    payload = {
-                        "ts": float(row[1]),
-                        "ped_count": int(row[2]),
-                        "veh_count": int(row[3]),
-                        "tl_color": str(row[4]),
-                        "nearest_vehicle_distance_m": float(row[5]),
-                        "avg_vehicle_speed_mps": float(row[6]),
-                        "action": str(row[7]),
-                        "scenario": latest_status.get("scenario","baseline"),
-                        "board_veh": latest_status.get("board_veh","OFF"),
-                        "board_ped_l": latest_status.get("board_ped_l","OFF"),
-                        "board_ped_r": latest_status.get("board_ped_r","OFF"),
-                    }
-                    socketio.emit("status", payload, namespace="/realtime")
-                    socketio.emit("log_insert", payload, namespace="/realtime")
-        except Exception as e:
-            print("[flask_app] tailer error:", repr(e))
-        eventlet.sleep(DB_TAIL_INTERVAL_S)
+            show_led(str(last_decision.get("action","OFF")))
+            last_status_ts = now
 
-# --------------------- HOOKS (called by app.py) ---------------------
-def publish_frame(cam_key: str, frame: np.ndarray):
-    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-    with _state_lock:
-        latest_frames[cam_key] = frame
-        latest_jpegs[cam_key]  = buf.tobytes() if ok else None
+        
+        # DB log every N sec
+        if now - last_log_ts >= LOG_EVERY_SEC:
+            log_event(
+                DB_PATH, now,
+                int(last_decision.get("ped_count",0)),
+                int(last_decision.get("veh_count",0)),
+                str(last_decision.get("tl_color","unknown")),
+                float(last_decision.get("nearest_m",0.0)),
+                float(last_decision.get("avg_mps",0.0)),
+                str(last_decision.get("action","OFF")),
+            )
+            last_log_ts = now
 
-def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
-                             tl_color: str, nearest_m: float, avg_mps: float,
-                             flags: Dict[str, bool], extra: Dict[str, bool]):
-    # In normal operation, the cloud sets action/scenario; this keeps UI responsive if cloud lags.
-    action, scenario = decide_scenario(now_ts, ped_count, veh_count, tl_color, {
-        "night": bool(flags.get("night", False)),
-        "rush": bool(flags.get("rush", False)),
-        "ambulance": bool(extra.get("ambulance", False)),
-    })
-    scenario_to_show = board_state.get("scenario", "baseline") or "baseline"
-    with _state_lock:
-        latest_status.update({
-            "ts": float(now_ts),
-            "ped_count": int(ped_count),
-            "veh_count": int(veh_count),
-            "tl_color": str(tl_color),
-            "nearest_vehicle_distance_m": float(nearest_m),
-            "avg_vehicle_speed_mps": float(avg_mps),
-            "action": action,
-            "scenario": scenario_to_show if scenario_to_show != "baseline" else scenario,
-            "board_veh": board_state["board_veh"],
-            "board_ped_l": board_state["board_ped_l"],
-            "board_ped_r": board_state["board_ped_r"],
-        })
-    socketio.emit("status", latest_status, namespace="/realtime")
+        elapsed = time.time() - t0
+        if elapsed < FRAME_TIME: time.sleep(FRAME_TIME - elapsed)
 
-# --------------------- MAIN ---------------------
-def start_http_server(host="0.0.0.0", port=5000):
-    print(f"[flask_app] Starting Flask-SocketIO on http://{host}:{port} ...")
-    socketio.start_background_task(tail_db_emit)
-    socketio.run(app, host=host, port=port, debug=False)
+# --- only now import the web app, to keep MQTT on native SSL ---
+def _late_import_flask_app():
+    global publish_frame, publish_status_from_loop, start_http_server
+    try:
+        from flask_app import publish_frame as _pf, publish_status_from_loop as _ps, start_http_server as _sh
+        publish_frame = _pf
+        publish_status_from_loop = _ps
+        start_http_server = _sh
+        print("[flask_app] module import completed")
+    except Exception as e:
+        print("[flask_app] import failed:", repr(e))
 
 if __name__ == "__main__":
-    start_http_server()
+    _late_import_flask_app()
+    threading.Thread(target=run_pipeline, daemon=True).start()
+    start_http_server(host="0.0.0.0", port=5000)
