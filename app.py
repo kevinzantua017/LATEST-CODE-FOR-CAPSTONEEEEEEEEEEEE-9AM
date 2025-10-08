@@ -1,12 +1,13 @@
 # app.py — Raspberry Pi I/O + Dashboard
-# Import the web app FIRST so eventlet is monkey-patched before anything else.
-from flask_app import publish_frame, publish_status_from_loop, start_http_server
+# IMPORTANT: set this BEFORE any other imports to keep eventlet from hijacking DNS/SSL.
+import os
+os.environ.setdefault("EVENTLET_NO_GREENDNS", "YES")
 
-import os, re, cv2, time, math, sqlite3, threading, json, ssl
-from queue import Queue
-from urllib.parse import urlparse, unquote
+# ---- postpone importing flask_app until AFTER MQTT is built (see bottom) ----
+# from flask_app import publish_frame, publish_status_from_loop, start_http_server
+
+import re, cv2, time, sqlite3, threading, json, ssl
 from typing import Optional, Union
-
 import numpy as np
 import paho.mqtt.client as mqtt
 
@@ -15,6 +16,15 @@ try:
     cv2.ocl.setUseOpenCL(False)
 except Exception:
     pass
+
+# Placeholders: will be replaced after we import flask_app later.
+def _noop_publish_frame(kind, frame_bgr): pass
+def _noop_publish_status_from_loop(**kwargs): pass
+def _noop_start_http_server(*a, **k): print("[flask_app] not yet loaded")
+
+publish_frame = _noop_publish_frame
+publish_status_from_loop = _noop_publish_status_from_loop
+start_http_server = _noop_start_http_server
 
 SHOW_WINDOWS = False
 PRINT_DEBUG = True
@@ -56,7 +66,6 @@ STATUS_MIN_PERIOD = float(os.getenv("SC_STATUS_PERIOD", "0.20"))
 
 # Colors
 COLOR_YELLOW=(0,255,255)
-COLOR_WHITE =(255,255,255)
 
 _last_pub = {"mqtt": 0.0, "ui": 0.0}
 
@@ -131,15 +140,17 @@ def on_message(c, u, msg):
 
 def build_mqtt():
     if not MQTT_HOST:
-        raise RuntimeError("MQTT_HOST not set. Source .env.pi first.")
+        raise RuntimeError("MQTT_HOST not set. Load env first.")
     c = mqtt.Client(client_id=f"pi-io-{SITE_ID}", clean_session=True, protocol=mqtt.MQTTv311)
     if MQTT_USER:
         c.username_pw_set(MQTT_USER, MQTT_PASS or None)
     if MQTT_TLS:
+        # Use system CA store; strict verification
         c.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
         c.tls_insecure_set(False)
-    c.on_connect    = on_connect
-    c.on_message    = on_message
+    c.on_connect = on_connect
+    c.on_message = on_message
+    # Start network loop BEFORE or IMMEDIATELY after connect; both are OK with native sockets
     c.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
     c.loop_start()
     return c
@@ -150,13 +161,6 @@ def _normalize_cam(value: Union[str,int,None]):
     if isinstance(value,int): return value
     s = str(value).strip()
     if s.isdigit(): return int(s)
-    try:
-        if s.startswith("/dev/"):
-            real = os.path.realpath(s)
-            m = re.match(r"^/dev/video(\d+)$", real)
-            if m: return int(m.group(1))
-            if os.path.exists(real): return real
-    except Exception: pass
     m = re.match(r"^/dev/video(\d+)$", s)
     return int(m.group(1)) if m else s
 
@@ -177,11 +181,23 @@ class CameraStream:
         if not self.cap.isOpened(): raise RuntimeError(f"Could not open camera index/path {idx}")
         try: self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception: pass
+        # Try MJPG first to reduce USB bandwidth; fall back to YUYV
+        try:
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        except Exception:
+            pass
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, min(self.fps, 20))
-        # Prefer YUYV -> fewer CPU cycles to decode than MJPG on some sticks
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
+        # If MJPG didn’t take, try YUYV
+        four = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        four_s = "".join([chr((four >> 8*i) & 0xFF) for i in range(4)])
+        if four_s.strip("\x00") not in ("MJPG",):
+            try:
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
+            except Exception:
+                pass
+
         self.cap.read()
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -278,9 +294,7 @@ def run_pipeline():
 
         # Try to use cloud "viz" frames if present (to show boxes)
         with viz_lock:
-            vp = viz_frames["ped"]
-            vv = viz_frames["veh"]
-            vt = viz_frames["tl"]
+            vp = viz_frames["ped"]; vv = viz_frames["veh"]; vt = viz_frames["tl"]
         if vp is not None: fp_s = cv2.resize(vp, (FRAME_W, FRAME_H))
         if vv is not None:
             vv = cv2.resize(vv, (FRAME_W, FRAME_H))
@@ -338,8 +352,19 @@ def run_pipeline():
         elapsed = time.time() - t0
         if elapsed < FRAME_TIME: time.sleep(FRAME_TIME - elapsed)
 
+# --- only now import the web app, to keep MQTT on native SSL ---
+def _late_import_flask_app():
+    global publish_frame, publish_status_from_loop, start_http_server
+    try:
+        from flask_app import publish_frame as _pf, publish_status_from_loop as _ps, start_http_server as _sh
+        publish_frame = _pf
+        publish_status_from_loop = _ps
+        start_http_server = _sh
+        print("[flask_app] module import completed")
+    except Exception as e:
+        print("[flask_app] import failed:", repr(e))
+
 if __name__ == "__main__":
-    # Avoid slow greendns TLS on Pi
-    os.environ.setdefault("EVENTLET_NO_GREENDNS", "YES")
+    _late_import_flask_app()
     threading.Thread(target=run_pipeline, daemon=True).start()
     start_http_server(host="0.0.0.0", port=5000)
