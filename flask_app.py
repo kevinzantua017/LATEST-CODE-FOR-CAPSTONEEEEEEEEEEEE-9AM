@@ -1,24 +1,28 @@
+#!/usr/bin/env python3
+# flask_app.py — dashboard server: MJPEG streaming + Socket.IO status
+# This file is safe to import after MQTT is set up in app.py (to avoid eventlet wrapping paho SSL).
+
 import eventlet
-eventlet.monkey_patch()  # MUST be first
+eventlet.monkey_patch()  # MUST be first in this module
 
 import os
-import sqlite3
-import threading
 import time
+import threading
 from typing import Dict, Optional, Tuple, List
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory, make_response
+from flask_cors import CORS
 from flask_socketio import SocketIO
 
 print("[flask_app] module import starting...")
 
 # --------------------- CONFIG ---------------------
 DB_PATH = os.getenv("SC_DB", "smart_crosswalk.db")
-JPEG_QUALITY = int(os.getenv("SC_JPEG_QUALITY", "70"))  # lower = smaller, faster
-STREAM_INTERVAL_S = float(os.getenv("SC_STREAM_INTERVAL", "0.03"))
+JPEG_QUALITY = int(os.getenv("SC_JPEG_QUALITY", "70"))     # lower = smaller, faster
 DB_TAIL_INTERVAL_S = float(os.getenv("SC_DB_TAIL_INTERVAL", "0.5"))
+DEFAULT_STREAM_FPS = float(os.getenv("SC_PUBLISH_HZ", "12"))
 
 # --------------------- SHARED STATE ---------------------
 latest_frames: Dict[str, Optional[np.ndarray]] = {"ped": None, "veh": None, "tl": None}
@@ -41,7 +45,7 @@ latest_status = {
     "avg_vehicle_speed_mps": 0.0,
     "action": "OFF",
     "scenario": "baseline",
-    # still tracked, but not shown as badges anymore
+    # still tracked for logs
     "board_veh": "OFF",
     "board_ped_l": "OFF",
     "board_ped_r": "OFF",
@@ -50,41 +54,46 @@ latest_status = {
 _state_lock = threading.Lock()
 
 # --------------------- APP / SOCKET ---------------------
+# Serve your static site from ./static (index.html, style.css, images, etc.)
 app = Flask(__name__, static_folder="static", static_url_path="")
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+
+# eventlet async mode fits our Pi setup
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 @app.get("/")
 def root_index():
-    return send_from_directory(app.static_folder, "index.html")
+    # Serve /static/index.html as the dashboard
+    index_path = os.path.join(app.static_folder, "index.html")
+    if os.path.exists(index_path):
+        return send_from_directory(app.static_folder, "index.html")
+    return make_response("Place your index.html in ./static/", 200)
 
-# Optional favicon (avoid 404)
+# Optional favicon (avoid 404s)
 @app.get("/favicon.ico")
 def favicon():
-    path = os.path.join(app.static_folder, "favicon.ico")
-    if os.path.exists(path):
+    ico = os.path.join(app.static_folder, "favicon.ico")
+    if os.path.exists(ico):
         return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/vnd.microsoft.icon")
     png = os.path.join(app.static_folder, "images", "Adamson.png")
     if os.path.exists(png):
         return send_from_directory(os.path.dirname(png), "Adamson.png", mimetype="image/png")
     return ("", 204)
 
-@app.get("/api/health")
-def api_health():
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=1.0)
-        conn.execute("PRAGMA user_version;")
-        conn.close()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "msg": repr(e)}), 500
+@app.after_request
+def _nocache(resp):
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
-# --------------------- SCENARIO ---------------------
+# --------------------- DECISION/SCENARIO (UI fallback) ---------------------
 def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
                     tl_color: str, flags: Dict[str, bool]) -> Tuple[str, str]:
     # emergency flag always overrides
     if flags.get("ambulance", False):
         return ("STOP", "scenario_3_emergency")
-    # simple demo heuristics
+    # simple heuristics for demo
     if flags.get("night", False) and ped_count >= 30 and veh_count <= 2 and tl_color == "green":
         return ("STOP", "scenario_1_night_ped")
     if flags.get("rush", False) and (5 <= ped_count <= 10) and veh_count >= 20 and tl_color == "red":
@@ -107,26 +116,55 @@ def decide_scenario(now_ts: float, ped_count: int, veh_count: int,
             action = "GO"
     return (action, "baseline")
 
-# --------------------- MJPEG STREAMING (uses cached JPEGs) ---------------------
-def mjpeg_stream(key: str):
-    boundary = b"--frame"
-    header   = b"Content-Type: image/jpeg\r\nCache-Control: no-cache\r\n\r\n"
+# --------------------- MJPEG STREAMING ---------------------
+def mjpeg_stream(key: str, fps_limit: float):
+    """
+    Multipart MJPEG generator with Content-Length per part and a stable boundary.
+    Works smoothly in all modern browsers.
+    """
+    boundary_name = "frame"          # must match the Response boundary below
+    boundary = ("--" + boundary_name).encode("ascii")
+    min_interval = 1.0 / max(1.0, fps_limit)
+
     while True:
+        t0 = time.time()
         with _state_lock:
             jpg = latest_jpegs.get(key)
+
         if jpg is None:
-            socketio.sleep(0.03)
-            continue
-        yield boundary + b"\r\n" + header + jpg + b"\r\n"
-        socketio.sleep(STREAM_INTERVAL_S)
+            # yield a tiny black frame until the first image arrives
+            black = np.zeros((240, 424, 3), np.uint8)
+            ok, buf = cv2.imencode(".jpg", black, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            jpg = buf.tobytes() if ok else None
+            if jpg is None:
+                eventlet.sleep(0.05)
+                continue
+
+        yield (
+            boundary + b"\r\n"
+            b"Content-Type: image/jpeg\r\n" +
+            f"Content-Length: {len(jpg)}\r\n\r\n".encode("ascii") +
+            jpg + b"\r\n"
+        )
+
+        dt = time.time() - t0
+        if dt < min_interval:
+            eventlet.sleep(min_interval - dt)
 
 @app.get("/stream/<cam>")
 def stream_cam(cam: str):
     if cam not in ("ped", "veh", "tl"):
         return "unknown cam", 404
-    return Response(mjpeg_stream(cam), mimetype="multipart/x-mixed-replace; boundary=frame")
+    # boundary must match the one inside mjpeg_stream()
+    return Response(
+        mjpeg_stream(cam, fps_limit=DEFAULT_STREAM_FPS),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+    )
 
 # --------------------- DB HELPERS ---------------------
+import sqlite3
+
 def _db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=3.0, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -148,6 +186,16 @@ def _safe_query_rows(sql: str, args=()):
         raise
 
 # --------------------- REST APIs ---------------------
+@app.get("/api/health")
+def api_health():
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=1.0)
+        conn.execute("PRAGMA user_version;")
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": repr(e)}), 500
+
 @app.get("/api/status")
 def api_status():
     with _state_lock:
@@ -155,7 +203,7 @@ def api_status():
 
 @app.get("/api/status_now")
 def api_status_now():
-    """Simple poll endpoint the dashboard can use if Socket.IO fails."""
+    # Poll fallback the dashboard uses alongside Socket.IO
     with _state_lock:
         return jsonify(latest_status)
 
@@ -238,7 +286,6 @@ def api_set_scenario():
     socketio.emit("status", latest_status, namespace="/realtime")
     return jsonify({"ok": True, "state": {**board_state}})
 
-# ---- Archive management ----
 @app.post("/api/logs/delete")
 def api_logs_delete():
     data = request.get_json(silent=True) or {}
@@ -307,7 +354,7 @@ def tail_db_emit():
                     socketio.emit("log_insert", payload, namespace="/realtime")
         except Exception as e:
             print("[flask_app] tailer error:", repr(e))
-        socketio.sleep(DB_TAIL_INTERVAL_S)
+        eventlet.sleep(DB_TAIL_INTERVAL_S)
 
 # --------------------- HOOKS (called by app.py) ---------------------
 def publish_frame(cam_key: str, frame: np.ndarray):
@@ -319,10 +366,11 @@ def publish_frame(cam_key: str, frame: np.ndarray):
 def publish_status_from_loop(now_ts: float, ped_count: int, veh_count: int,
                              tl_color: str, nearest_m: float, avg_mps: float,
                              flags: Dict[str, bool], extra: Dict[str, bool]):
+    # In normal operation, the cloud sets action/scenario; this keeps UI responsive if cloud lags.
     action, scenario = decide_scenario(now_ts, ped_count, veh_count, tl_color, {
-        "night": flags.get("night", False),
-        "rush": flags.get("rush", False),
-        "ambulance": extra.get("ambulance", False),
+        "night": bool(flags.get("night", False)),
+        "rush": bool(flags.get("rush", False)),
+        "ambulance": bool(extra.get("ambulance", False)),
     })
     scenario_to_show = board_state.get("scenario", "baseline") or "baseline"
     with _state_lock:
