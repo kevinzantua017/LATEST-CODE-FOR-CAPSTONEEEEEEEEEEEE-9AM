@@ -1,0 +1,53 @@
+cd ~/Ped_Scanner
+cp -f app.py app.py.pre_onmsg_fix.$(date +%s)
+
+python - <<'PY'
+import io,sys,re,time
+p='app.py'
+s=open(p,'r',encoding='utf-8').read()
+
+# Replace the on_message function with a safe version that defines now_ts and guards decode failures
+pat=r'def on_message\(c, u, msg\):[\\s\\S]*?def build_mqtt\(\):'
+rep=r"""
+def on_message(c, u, msg):
+    global last_decision, viz_frames
+    try:
+        if msg.topic == TOPIC_DEC:
+            d = json.loads(msg.payload.decode("utf-8","ignore"))
+            for k in last_decision.keys():
+                if k in d: last_decision[k] = d[k]
+            # push to UI and LED
+            publish_status_from_loop(
+                now_ts=float(last_decision.get("ts", time.time())),
+                ped_count=int(last_decision.get("ped_count",0)),
+                veh_count=int(last_decision.get("veh_count",0)),
+                tl_color=str(last_decision.get("tl_color","unknown")),
+                nearest_m=float(last_decision.get("nearest_m",0.0)),
+                avg_mps=float(last_decision.get("avg_mps",0.0)),
+                flags={"night": time.localtime().tm_hour>=21, "rush": time.localtime().tm_hour==7},
+                extra={"ambulance": False},
+            )
+            show_led(str(last_decision.get("action","OFF")))
+        else:
+            # VIZ frames from cloud (ped/veh/tl)
+            arr = np.frombuffer(msg.payload, dtype=np.uint8)
+            im  = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if im is None:
+                return
+            now_ts = time.time()
+            with viz_lock:
+                if msg.topic == TOPIC_VPED:
+                    viz_frames["ped"] = (im, now_ts)
+                elif msg.topic == TOPIC_VVEH:
+                    viz_frames["veh"] = (im, now_ts)
+                elif msg.topic == TOPIC_VTL:
+                    viz_frames["tl"]  = (im, now_ts)
+    except Exception as e:
+        print("[MQTT] on_message error:", repr(e))
+
+def build_mqtt():
+"""
+new=re.sub(pat,rep,s,flags=re.M)
+open(p,'w',encoding='utf-8').write(new)
+print("[OK] on_message() patched; undefined now_ts fixed and guards added.")
+PY
