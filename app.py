@@ -12,7 +12,8 @@ import paho.mqtt.client as mqtt
 try:
     from turbojpeg import TurboJPEG, TJPF_BGR
     _tj = TurboJPEG()
-    def _jpeg(bgr, q=60): return _tj.encode(bgr, quality=int(q), pixel_format=TJPF_BGR)
+    def _jpeg(bgr, q=60):
+        return _tj.encode(bgr, quality=int(q), pixel_format=TJPF_BGR)
     print("[JPEG] Using turbojpeg")
 except Exception:
     def _jpeg(bgr, q=60):
@@ -36,20 +37,20 @@ publish_status_from_loop = _noop_publish_status_from_loop
 start_http_server = _noop_start_http_server
 
 SHOW_WINDOWS = False
-PRINT_DEBUG = True
+PRINT_DEBUG  = True
 
 # ---------- ENV ----------
 SITE_ID  = os.getenv("SC_SITE_ID", "adsmn-01")
 
 # Camera + UI perf
-FRAME_W   = int(os.getenv("SC_FRAME_W", "640"))
-FRAME_H   = int(os.getenv("SC_FRAME_H", "360"))
-FPS       = int(os.getenv("SC_FPS", "8"))
+FRAME_W    = int(os.getenv("SC_FRAME_W", "640"))
+FRAME_H    = int(os.getenv("SC_FRAME_H", "360"))
+FPS        = int(os.getenv("SC_FPS", "8"))
 FRAME_TIME = 1.0 / max(1, FPS)
-SKIP_FRAMES = int(os.getenv("SC_SKIP", "1"))
-PUBLISH_HZ  = float(os.getenv("SC_PUBLISH_HZ", "6"))
-JPEG_QUALITY= int(os.getenv("SC_JPEG_QUALITY", "60"))
-LANE_Y      = int(os.getenv("SC_LANE_Y", "250"))
+SKIP_FRAMES  = int(os.getenv("SC_SKIP", "1"))
+PUBLISH_HZ   = float(os.getenv("SC_PUBLISH_HZ", "6"))
+JPEG_QUALITY = int(os.getenv("SC_JPEG_QUALITY", "60"))
+LANE_Y       = int(os.getenv("SC_LANE_Y", "250"))
 
 # MQTT split fields
 MQTT_HOST = os.getenv("MQTT_HOST")
@@ -59,21 +60,21 @@ MQTT_PASS = os.getenv("MQTT_PASSWORD")
 MQTT_TLS  = os.getenv("MQTT_TLS", "1") == "1"
 
 # Topics
-TOPIC_PED = f"crosswalk/{SITE_ID}/frames/ped"
-TOPIC_VEH = f"crosswalk/{SITE_ID}/frames/veh"
-TOPIC_TL  = f"crosswalk/{SITE_ID}/frames/tl"
-TOPIC_DEC = f"crosswalk/{SITE_ID}/decision"
-TOPIC_VPED= f"crosswalk/{SITE_ID}/viz/ped"
-TOPIC_VVEH= f"crosswalk/{SITE_ID}/viz/veh"
-TOPIC_VTL = f"crosswalk/{SITE_ID}/viz/tl"
+TOPIC_PED  = f"crosswalk/{SITE_ID}/frames/ped"
+TOPIC_VEH  = f"crosswalk/{SITE_ID}/frames/veh"
+TOPIC_TL   = f"crosswalk/{SITE_ID}/frames/tl"
+TOPIC_DEC  = f"crosswalk/{SITE_ID}/decision"
+TOPIC_VPED = f"crosswalk/{SITE_ID}/viz/ped"
+TOPIC_VVEH = f"crosswalk/{SITE_ID}/viz/veh"
+TOPIC_VTL  = f"crosswalk/{SITE_ID}/viz/tl"
 
 # DB
-DB_PATH = os.getenv("SC_DB", "smart_crosswalk.db")
-LOG_EVERY_SEC = int(os.getenv("SC_LOG_SEC", "30"))
+DB_PATH           = os.getenv("SC_DB", "smart_crosswalk.db")
+LOG_EVERY_SEC     = int(os.getenv("SC_LOG_SEC", "30"))
 STATUS_MIN_PERIOD = float(os.getenv("SC_STATUS_PERIOD", "0.20"))
 
 # Colors
-COLOR_YELLOW=(0,255,255)
+COLOR_YELLOW = (0,255,255)
 
 _last_pub = {"mqtt": 0.0, "ui": 0.0}
 
@@ -86,8 +87,12 @@ def _init_led():
         from PIL import ImageFont
 
         serial = spi(port=0, device=0, gpio=noop())
-        device = max7219(serial, cascaded=int(os.getenv("SC_LED_CASCADE","4")),
-                         block_orientation=int(os.getenv("SC_LED_ORIENTATION","-90")), rotate=0)
+        device = max7219(
+            serial,
+            cascaded=int(os.getenv("SC_LED_CASCADE","4")),
+            block_orientation=int(os.getenv("SC_LED_ORIENTATION","-90")),
+            rotate=0
+        )
         font = ImageFont.load_default()
 
         def show_led(msg: str):
@@ -99,13 +104,15 @@ def _init_led():
         print("[LED] Fallback console:", repr(e))
         return lambda msg: print("[LED]", msg)
 
+# IMPORTANT: initialize show_led **after** defining _init_led, and before MQTT callbacks
 show_led = _init_led()
 
 # ---------- MQTT (Pi) ----------
-viz_lock = threading.Lock()
-# store (image, ts); prefer fresh cloud viz, else local frames for smoothness
+viz_lock   = threading.Lock()
+# store (image, ts); prefer fresh cloud viz, else local frames
 viz_frames = {"ped": (None, 0.0), "veh": (None, 0.0), "tl": (None, 0.0)}
-VIZ_MAX_AGE_S = 0.25
+VIZ_MAX_AGE_S = 1.0
+
 last_decision = {
     "ts": 0.0, "ped_count": 0, "veh_count": 0, "tl_color": "unknown",
     "nearest_m": 0.0, "avg_mps": 0.0, "action": "OFF", "scenario": "baseline"
@@ -119,13 +126,14 @@ def on_connect(c, u, f, rc, p=None):
     c.subscribe([(TOPIC_DEC,1), (TOPIC_VPED,0), (TOPIC_VVEH,0), (TOPIC_VTL,0)])
 
 def on_message(c, u, msg):
-    global last_decision, viz_frames
+    global last_decision, viz_frames, show_led
     try:
         if msg.topic == TOPIC_DEC:
             d = json.loads(msg.payload.decode("utf-8","ignore"))
             for k in last_decision.keys():
-                if k in d: last_decision[k] = d[k]
-            # push to UI and LED
+                if k in d:
+                    last_decision[k] = d[k]
+            # Push to UI; LED is driven by local recomputed status later (NOT by cloud payload)
             publish_status_from_loop(
                 now_ts=float(last_decision.get("ts", time.time())),
                 ped_count=int(last_decision.get("ped_count",0)),
@@ -136,15 +144,20 @@ def on_message(c, u, msg):
                 flags={"night": time.localtime().tm_hour>=21, "rush": time.localtime().tm_hour==7},
                 extra={"ambulance": False},
             )
-            show_led(str(last_decision.get("action","OFF")))
         else:
+            # VIZ frames from cloud (ped/veh/tl)
             arr = np.frombuffer(msg.payload, dtype=np.uint8)
             im  = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            now_ts = time.time()  # <-- missing before
+            if im is None:
+                return
+            now_ts = time.time()
             with viz_lock:
-                if msg.topic == TOPIC_VPED: viz_frames["ped"] = (im, now_ts)
-                elif msg.topic == TOPIC_VVEH: viz_frames["veh"] = (im, now_ts)
-                elif msg.topic == TOPIC_VTL:  viz_frames["tl"]  = (im, now_ts)
+                if msg.topic == TOPIC_VPED:
+                    viz_frames["ped"] = (im, now_ts)
+                elif msg.topic == TOPIC_VVEH:
+                    viz_frames["veh"] = (im, now_ts)
+                elif msg.topic == TOPIC_VTL:
+                    viz_frames["tl"]  = (im, now_ts)
     except Exception as e:
         print("[MQTT] on_message error:", repr(e))
 
@@ -155,7 +168,6 @@ def build_mqtt():
     if MQTT_USER:
         c.username_pw_set(MQTT_USER, MQTT_PASS or None)
     if MQTT_TLS:
-        # Use system CA store; strict verification
         c.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
         c.tls_insecure_set(False)
     c.on_connect = on_connect
@@ -167,9 +179,10 @@ def build_mqtt():
 # ---------- Cameras ----------
 def _normalize_cam(value: Union[str,int,None]):
     if value is None: return None
-    if isinstance(value,int): return value
+    if isinstance(value, int): return value
     s = str(value).strip()
     if s.isdigit(): return int(s)
+    # allow '/dev/videoN' or '/dev/v4l/by-id/...'
     m = re.match(r"^/dev/video(\d+)$", s)
     return int(m.group(1)) if m else s
 
@@ -180,49 +193,81 @@ class CameraStream:
         self.frame = None
         self.ret = False
         self.stopped = False
+        self.last_update_ts = 0.0
+        self.reopen_stale_sec = float(os.getenv("SC_CAM_REOPEN_STALE_SEC", "2.5"))
+        self.read_interval     = float(os.getenv("SC_CAM_READ_INTERVAL", "0.010"))
+        self.cap = None
         self._open_camera()
         threading.Thread(target=self._update, daemon=True).start()
+        threading.Thread(target=self._watchdog, daemon=True).start()
 
     def _open_camera(self):
         idx = _normalize_cam(self.index)
-        self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-        if not self.cap.isOpened(): self.cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
-        if not self.cap.isOpened(): raise RuntimeError(f"Could not open camera index/path {idx}")
-        try: self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception: pass
-        # Try MJPG first to reduce USB bandwidth; fall back to YUYV
         try:
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            if self.cap is not None:
+                self.cap.release()
         except Exception:
             pass
+
+        # Prefer V4L2, then fall back to ANY
+        self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open camera index/path {idx}")
+
+        # Reduce buffering
+        try: self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception: pass
+
+        # Ask for MJPG to save USB bandwidth
+        try: self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        except Exception: pass
+
+        # Size/FPS (driver may clamp)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, min(self.fps, 20))
-
         self.cap.read()
+
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         f = self.cap.get(cv2.CAP_PROP_FPS)
         four = int(self.cap.get(cv2.CAP_PROP_FOURCC))
-        four_s = "".join([chr((four >> 8*i) & 0xFF) for i in range(4)])
+        four_s = "".join([chr((four >> 8*i) & 0xFF) for i in range(4)]).strip("\x00")
         print(f"[OPEN] {idx} -> {w}x{h}@{f:.1f} FOURCC={four_s}")
 
     def _update(self):
-        frame_interval = 1.0 / max(1,self.fps)
+        target_interval = 1.0 / max(1, self.fps)
         last_t = 0.0
         while not self.stopped:
-            ret, frame = self.cap.read()
-            if not ret or frame is None:
-                time.sleep(0.02)
-                continue
-            if frame.shape[1] != self.width or frame.shape[0] != self.height:
-                frame = cv2.resize(frame, (self.width,self.height), interpolation=cv2.INTER_AREA)
-            with self.lock:
-                self.ret, self.frame = True, frame
+            ok, frame = self.cap.read()
             now = time.time()
-            sleep_left = frame_interval - (now - last_t)
-            if sleep_left > 0: time.sleep(sleep_left)
+            if ok and frame is not None:
+                if frame.shape[1] != self.width or frame.shape[0] != self.height:
+                    frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+                with self.lock:
+                    self.ret, self.frame = True, frame
+                    self.last_update_ts = now
+            # pacing (prevents USB hammering and lowers CPU)
+            sleep_left = max(self.read_interval, target_interval - (now - last_t))
+            if sleep_left > 0:
+                time.sleep(sleep_left)
             last_t = now
+
+    def _watchdog(self):
+        # Re-open if no new frame for N seconds
+        while not self.stopped:
+            time.sleep(0.5)
+            if self.reopen_stale_sec <= 0:
+                continue
+            now = time.time()
+            if (now - self.last_update_ts) > self.reopen_stale_sec:
+                try:
+                    print(f"[WATCHDOG] Reopening camera {self.index} (stale {now - self.last_update_ts:.1f}s)")
+                    self._open_camera()
+                except Exception as e:
+                    print(f"[WATCHDOG] reopen failed for {self.index}: {e}")
 
     def read(self):
         with self.lock:
@@ -296,21 +341,19 @@ def run_pipeline():
         # Try to use cloud "viz" frames if present (to show boxes)
         now_chk = time.time()
         with viz_lock:
-            vp, tp = viz_frames["ped"]
-            vv, tv = viz_frames["veh"]
-            vt, tt = viz_frames["tl"]          # <-- your code used `t, tt` by mistake
+            vp, tp = viz_frames.get("ped", (None, 0.0))
+            vv, tv = viz_frames.get("veh", (None, 0.0))
+            vt, tt = viz_frames.get("tl",  (None, 0.0))
 
         if vp is not None and (now_chk - tp) <= VIZ_MAX_AGE_S:
             fp_s = cv2.resize(vp, (FRAME_W, FRAME_H))
-        # else keep local fp_s
 
         if vv is not None and (now_chk - tv) <= VIZ_MAX_AGE_S:
             vv_resized = cv2.resize(vv, (FRAME_W, FRAME_H))
             cv2.line(vv_resized, (0, LANE_Y), (FRAME_W, LANE_Y), COLOR_YELLOW, 2)
             fv_s = vv_resized
-        # else keep local fv_s
 
-        if vt is not None and (now_chk - tt) <= VIZ_MAX_AGE_S:   # <-- properly indented block
+        if vt is not None and (now_chk - tt) <= VIZ_MAX_AGE_S:
             ft_s = cv2.resize(vt, (FRAME_W, FRAME_H))
 
         # Publish to dashboard (SocketIO)
@@ -330,7 +373,7 @@ def run_pipeline():
             if jt is not None: mc.publish(TOPIC_TL,  jt, qos=0, retain=False)
             _last_pub["mqtt"] = now_mq
 
-        # Periodic status + LED synced to cloud decision
+        # Periodic status + LED (LED driven locally, not by cloud payload)
         now = time.time()
         if now - last_status_ts >= STATUS_MIN_PERIOD:
             publish_status_from_loop(
@@ -343,7 +386,11 @@ def run_pipeline():
                 flags={"night": time.localtime(now).tm_hour>=21, "rush": time.localtime(now).tm_hour==7},
                 extra={"ambulance": False},
             )
-            show_led(str(last_decision.get("action","OFF")))
+            # keep LED in sync with the *current* local action
+            try:
+                show_led(str(last_decision.get("action","OFF")).upper())
+            except Exception as e:
+                print("[LED] update error:", repr(e))
             last_status_ts = now
 
         # DB log every N sec
@@ -360,7 +407,8 @@ def run_pipeline():
             last_log_ts = now
 
         elapsed = time.time() - t0
-        if elapsed < FRAME_TIME: time.sleep(FRAME_TIME - elapsed)
+        if elapsed < FRAME_TIME:
+            time.sleep(FRAME_TIME - elapsed)
 
 # --- only now import the web app, to keep MQTT on native SSL ---
 def _late_import_flask_app():
