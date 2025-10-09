@@ -1,0 +1,44 @@
+cd ~/Ped_Scanner
+cp -f app.py app.py.revert_led.$(date +%s)
+
+# 1) Remove "from cloud decision" LED lines inside on_message()
+python - <<'PY'
+import re
+p='app.py'
+s=open(p,'r',encoding='utf-8').read()
+
+# Remove the inserted "act = ..." + "show_led(act)" + print line
+s=re.sub(r'\n\s*act\s*=\s*str\(d\.get\([^)]*\)\)\.upper\(\)\s*\n\s*show_led\(act\)\s*\n\s*print\(\s*"\[LED\] from cloud decision ->",\s*act\s*\)\s*','\n',s,flags=re.M)
+
+# Ensure default LED call remains in on_message() (TOPIC_DEC branch) — use local last_decision
+s=re.sub(r'(publish_status_from_loop\([\s\S]*?\)\s*\)\s*)\n(\s*#.*\n)*(\s*)',
+         r'\1\n\3show_led(str(last_decision.get("action","OFF")).upper())\n',
+         s, flags=re.M)
+
+open(p,'w',encoding='utf-8').write(s)
+print("[OK] on_message() reverted to local LED call.")
+PY
+
+# 2) Re-enable (or add) the periodic LED update in run_pipeline()
+python - <<'PY'
+import re
+p='app.py'
+s=open(p,'r',encoding='utf-8').read()
+
+# If the loop LED line was commented, restore it.
+s=re.sub(r'^\s*#\s*LED driven by cloud decision.*$', '', s, flags=re.M)
+if 'show_led(str(last_decision.get("action","OFF")).upper())' not in s:
+    s=s.replace(
+        'last_status_ts = now',
+        'show_led(str(last_decision.get("action","OFF")).upper())\n            last_status_ts = now'
+    )
+
+open(p,'w',encoding='utf-8').write(s)
+print("[OK] main loop LED update ensured.")
+PY
+
+# 3) Restart the app
+source .venv/bin/activate
+source .env.pi.sh
+pkill -f 'python3 app.py' || true
+python3 app.py
