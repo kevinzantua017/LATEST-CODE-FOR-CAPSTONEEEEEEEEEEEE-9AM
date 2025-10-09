@@ -1,0 +1,129 @@
+cd ~/Ped_Scanner
+
+# 1) Make a safe backup of your current app.py
+cp -f app.py app.py.bak.$(date +%s)
+
+# 2) Create a patch script that replaces ONLY the CameraStream class
+cat > replace_camerastream.sh <<'SH'
+#!/usr/bin/env bash
+set -e
+in="app.py"
+out="app.py.new"
+start_pat='^class CameraStream:'
+end_pat='^# ---------- DB ----------'
+
+# Emit everything up to (but not including) the CameraStream class
+awk -v sp="$start_pat" 'BEGIN{p=1} p && $0 ~ sp {p=0} p{print}' "$in" > "$out"
+
+# Emit the NEW CameraStream implementation
+cat >> "$out" <<'PY'
+# ---------- Cameras ----------
+def _normalize_cam(value: Union[str,int,None]):
+    if value is None: return None
+    if isinstance(value,int): return value
+    s = str(value).strip()
+    if s.isdigit(): return int(s)
+    return s  # /dev/videoN or /dev/v4l/by-id/...
+
+class CameraStream:
+    def __init__(self, index, width, height, fps):
+        self.index, self.width, self.height, self.fps = index, width, height, fps
+        self.lock = threading.Lock()
+        self.frame = None
+        self.ret = False
+        self.stopped = False
+        self.last_update_ts = 0.0
+        self.reopen_stale_sec = float(os.getenv("SC_CAM_REOPEN_STALE_SEC", "2.5"))
+        self.read_interval = float(os.getenv("SC_CAM_READ_INTERVAL", "0.010"))
+        self._open_camera()
+        threading.Thread(target=self._update, daemon=True).start()
+        threading.Thread(target=self._watchdog, daemon=True).start()
+
+    def _open_camera(self):
+        idx = _normalize_cam(self.index)
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
+        # Prefer V4L2, then fall back to ANY
+        self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open camera index/path {idx}")
+
+        # Reduce buffering
+        try: self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception: pass
+
+        # Ask for MJPG to save USB bandwidth
+        try: self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        except Exception: pass
+
+        # Size/FPS (driver may clamp)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, min(self.fps, 20))
+        self.cap.read()
+
+        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        f = self.cap.get(cv2.CAP_PROP_FPS)
+        four = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        four_s = "".join([chr((four >> 8*i) & 0xFF) for i in range(4)])
+        print(f"[OPEN] {idx} -> {w}x{h}@{f:.1f} FOURCC={four_s.strip()}")
+
+    def _update(self):
+        target_interval = 1.0 / max(1, self.fps)
+        last_t = 0.0
+        while not self.stopped:
+            ok, frame = self.cap.read()
+            now = time.time()
+            if ok and frame is not None:
+                if frame.shape[1] != self.width or frame.shape[0] != self.height:
+                    frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+                with self.lock:
+                    self.ret, self.frame = True, frame
+                    self.last_update_ts = now
+            # pacing (prevents USB hammering and lowers CPU)
+            sleep_left = max(self.read_interval, target_interval - (now - last_t))
+            if sleep_left > 0:
+                time.sleep(sleep_left)
+            last_t = now
+
+    def _watchdog(self):
+        # Re-open if no new frame for N seconds
+        while not self.stopped:
+            time.sleep(0.5)
+            if self.reopen_stale_sec <= 0:
+                continue
+            now = time.time()
+            if (now - self.last_update_ts) > self.reopen_stale_sec:
+                try:
+                    print(f"[WATCHDOG] Reopening camera {self.index} (stale {now - self.last_update_ts:.1f}s)")
+                    self._open_camera()
+                except Exception as e:
+                    print(f"[WATCHDOG] reopen failed for {self.index}: {e}")
+
+    def read(self):
+        with self.lock:
+            return self.ret, None if self.frame is None else self.frame.copy()
+
+    def stop(self):
+        self.stopped = True
+        try: self.cap.release()
+        except Exception: pass
+PY
+
+# Emit the rest of the file starting from "# ---------- DB ----------"
+awk -v ep="$end_pat" 'f || $0 ~ ep {f=1; print}' "$in" >> "$out"
+
+# Move into place atomically
+mv "$out" "$in"
+echo "[OK] CameraStream replaced. Backup saved as app.py.bak.<timestamp>"
+SH
+
+# 3) Run the patch
+chmod +x replace_camerastream.sh
+./replace_camerastream.sh
