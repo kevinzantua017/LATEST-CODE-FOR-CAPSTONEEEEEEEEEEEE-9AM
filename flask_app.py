@@ -1,7 +1,3 @@
-# flask_app.py — Realtime dashboard + MJPEG streams + REST + Socket.IO
-import eventlet
-eventlet.monkey_patch()
-
 import os
 import sqlite3
 import threading
