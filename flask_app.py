@@ -9,8 +9,9 @@ import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_socketio import SocketIO
 
+# Optional CORS; if not present we just continue without it
 try:
-    from flask_cors import CORS  # optional CORS; if not present we just continue without it
+    from flask_cors import CORS
     _HAS_CORS = True
 except Exception:
     _HAS_CORS = False
