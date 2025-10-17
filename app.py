@@ -210,6 +210,8 @@ def on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage) -> None:
                 tl_color=str(last_decision.get("tl_color", "unknown")),
                 nearest_m=float(last_decision.get("nearest_m", 0.0)),
                 avg_mps=float(last_decision.get("avg_mps", 0.0)),
+                action=last_decision.get("action", "OFF"),
+                scenario=last_decision.get("scenario", "baseline"),
                 flags={
                     "night": time.localtime().tm_hour >= 21,
                     "rush": time.localtime().tm_hour == 7,
