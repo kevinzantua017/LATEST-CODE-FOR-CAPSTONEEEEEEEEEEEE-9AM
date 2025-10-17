@@ -151,8 +151,12 @@ def publish_status_from_loop(**kwargs):
     nearest_m = float(kwargs.get("nearest_m", 0.0))
     avg_mps = float(kwargs.get("avg_mps", 0.0))
     flags = kwargs.get("flags", {}) or {}
-    # Compute decision and scenario
-    action, scenario = decide_scenario(now_ts, ped_count, veh_count, tl_color, flags)
+    # Use provided action/scenario if present, otherwise compute them using decide_scenario.
+    action = kwargs.get("action")
+    scenario = kwargs.get("scenario")
+    if action is None or scenario is None:
+        # Only compute if either value is missing; decide_scenario always returns both
+        action, scenario = decide_scenario(now_ts, ped_count, veh_count, tl_color, flags)
     with _state_lock:
         latest_status["ts"] = now_ts
         latest_status["ped_count"] = ped_count
@@ -162,6 +166,9 @@ def publish_status_from_loop(**kwargs):
         latest_status["avg_vehicle_speed_mps"] = avg_mps
         latest_status["action"] = action
         latest_status["scenario"] = scenario
+        # Keep board_state's scenario in sync with the computed scenario.  This
+        # allows the UI to reflect the current state in the scenarios page.
+        board_state["scenario"] = scenario
         # Merge board state overrides from board_state dict
         latest_status["board_veh"] = board_state.get("board_veh", latest_status.get("board_veh", "OFF"))
         latest_status["board_ped_l"] = board_state.get("board_ped_l", latest_status.get("board_ped_l", "OFF"))
@@ -228,6 +235,221 @@ def stream_cam(cam: str):
     return Response(mjpeg_stream(cam), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+# --------------------- STATUS & SCENARIO API ---------------------
+
+@app.get("/api/status_now")
+def api_status_now():
+    """
+    Return the most recently published status as JSON.
+
+    The dashboard polls this endpoint every couple of seconds as a
+    fallback when Socket.IO events are missed.  Returning the
+    ``latest_status`` dictionary ensures that all current counts,
+    action, scenario, traffic light colour and board states are
+    available to the web client.
+    """
+    with _state_lock:
+        return jsonify(latest_status)
+
+
+@app.post("/api/set_scenario")
+def api_set_scenario():
+    """
+    Update the active scenario and board LED states based on the
+    payload sent from the dashboard.
+
+    The dashboard sends a JSON object with keys such as ``scenario``,
+    ``board_veh``, ``board_ped_l`` and ``board_ped_r``.  Any of
+    these keys present in the payload will update the corresponding
+    entry in the global ``board_state`` dict.  After updating
+    ``board_state`` the function broadcasts a fresh status via
+    ``publish_status_from_loop`` so connected clients can reflect the
+    new board state immediately.  Returns a JSON object indicating
+    success and the new board state.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+    valid_keys = {"board_veh", "board_ped_l", "board_ped_r", "scenario"}
+    updated = False
+    with _state_lock:
+        for k, v in data.items():
+            if k in valid_keys:
+                board_state[k] = str(v).upper() if k.startswith("board_") else str(v)
+                updated = True
+    # If scenario changed, update latest_status immediately
+    if "scenario" in data:
+        latest_status["scenario"] = data["scenario"]
+    # Broadcast updated status so the UI reflects changes without waiting
+    if updated:
+        publish_status_from_loop(
+            now_ts=time.time(),
+            ped_count=latest_status.get("ped_count", 0),
+            veh_count=latest_status.get("veh_count", 0),
+            tl_color=latest_status.get("tl_color", "unknown"),
+            nearest_m=latest_status.get("nearest_vehicle_distance_m", 0.0),
+            avg_mps=latest_status.get("avg_vehicle_speed_mps", 0.0),
+            flags={},
+            extra={},
+        )
+    return jsonify({"ok": True, "board_state": board_state})
+
+
+# --------------------- ANALYTICS & LOG API ---------------------
+
+@app.get("/api/analytics")
+def api_analytics():
+    """
+    Return aggregated per-minute statistics for the last ten minutes.
+
+    The response is a list of dictionaries, each containing a minute
+    timestamp string (e.g. "2025-10-17 15:04") and averages for
+    pedestrian and vehicle counts, along with the number of GO, STOP
+    and OFF decisions.  Missing minutes are omitted; the client pads
+    missing values itself.
+    """
+    now_ts = time.time()
+    start_ts = now_ts - 10 * 60  # last 10 minutes
+    rows = _safe_query_rows(
+        """
+        SELECT strftime('%Y-%m-%d %H:%M', datetime(ts, 'unixepoch', 'localtime')) AS minute,
+               AVG(ped_count) AS avg_ped,
+               AVG(veh_count) AS avg_veh,
+               SUM(CASE WHEN action = 'GO' THEN 1 ELSE 0 END) AS go,
+               SUM(CASE WHEN action = 'STOP' THEN 1 ELSE 0 END) AS stop,
+               SUM(CASE WHEN action = 'OFF' THEN 1 ELSE 0 END) AS off
+          FROM events
+         WHERE ts >= ?
+         GROUP BY minute
+         ORDER BY minute ASC
+        """,
+        (start_ts,),
+    )
+    data = []
+    for minute, avg_ped, avg_veh, go, stop, off in rows:
+        data.append({
+            "minute": minute,
+            "avg_ped": float(avg_ped) if avg_ped is not None else 0.0,
+            "avg_veh": float(avg_veh) if avg_veh is not None else 0.0,
+            "go": int(go) if go is not None else 0,
+            "stop": int(stop) if stop is not None else 0,
+            "off": int(off) if off is not None else 0,
+        })
+    return jsonify(data)
+
+
+@app.get("/api/logs")
+def api_logs():
+    """
+    Return recent log rows in descending order of event ID.
+
+    The optional ``limit`` query parameter controls how many rows to
+    return (default 200).  Each returned row includes the event
+    timestamp, counts, traffic light colour, distance, speed and
+    action, along with the current board state.  Board state at the
+    time of logging is not stored in the events table, so the current
+    values from ``latest_status`` are used for display purposes.
+    """
+    try:
+        limit = int(request.args.get('limit', '200'))
+    except Exception:
+        limit = 200
+    rows = _safe_query_rows(
+        """
+        SELECT id, ts, ped_count, veh_count, tl_color,
+               nearest_vehicle_distance_m, avg_vehicle_speed_mps, action
+          FROM events
+         ORDER BY id DESC
+         LIMIT ?
+        """,
+        (limit,),
+    )
+    result = []
+    # Capture current board state for each entry (board values not stored per-row)
+    current_board = {
+        "board_veh": latest_status.get("board_veh", "OFF"),
+        "board_ped_l": latest_status.get("board_ped_l", "OFF"),
+        "board_ped_r": latest_status.get("board_ped_r", "OFF"),
+    }
+    for row in rows:
+        event_id, ts_val, ped_c, veh_c, tl_col, nearest_m, avg_mps, action_val = row
+        result.append({
+            "id": event_id,
+            "ts": ts_val,
+            "ped_count": ped_c,
+            "veh_count": veh_c,
+            "tl_color": tl_col,
+            "nearest_vehicle_distance_m": nearest_m,
+            "avg_vehicle_speed_mps": avg_mps,
+            "action": action_val,
+            "board_veh": current_board["board_veh"],
+            "board_ped_l": current_board["board_ped_l"],
+            "board_ped_r": current_board["board_ped_r"],
+        })
+    return jsonify(result)
+
+
+@app.post("/api/logs/delete")
+def api_logs_delete():
+    """
+    Delete selected log rows by ID.
+
+    Expects a JSON payload with a list of integer IDs under the key
+    ``ids``.  Deleting logs does not affect the ``latest_status``.
+    Returns the number of deleted rows.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        ids = data.get("ids", [])
+        ids = [int(i) for i in ids if isinstance(i, (int, float, str))]
+    except Exception:
+        ids = []
+    if not ids:
+        return jsonify({"ok": True, "deleted": 0})
+    # Build parameter list for deletion
+    placeholders = ",".join(["?"] * len(ids))
+    conn = _db_connect()
+    cur = conn.cursor()
+    try:
+        cur.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
+        conn.commit()
+        deleted = cur.rowcount
+    except Exception:
+        deleted = 0
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "deleted": deleted})
+
+
+@app.post("/api/logs/clear")
+def api_logs_clear():
+    """
+    Delete all log rows from the events table.
+
+    Expects a JSON payload with ``{"all": true}`` to confirm the
+    deletion.  Returns the number of deleted rows.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        do_clear = bool(data.get("all"))
+    except Exception:
+        do_clear = False
+    if not do_clear:
+        return jsonify({"ok": False, "deleted": 0})
+    conn = _db_connect()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM events")
+        conn.commit()
+        deleted = cur.rowcount
+    except Exception:
+        deleted = 0
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "deleted": deleted})
+
+
 # --------------------- DB HELPERS ---------------------
 def _db_connect() -> sqlite3.Connection:
     """Connect to the SQLite database with sensible defaults."""
@@ -258,32 +480,38 @@ def decide_scenario(now_ts: float, ped_count: int, veh_count: int, tl_color: str
     """
     Decide the action (GO/STOP/OFF) and scenario based on inputs.
 
-    This mirrors the logic used on the Raspberry Pi but is simplified
-    here.  If ``flags`` includes 'ambulance', emergency is always
-    prioritised.  Otherwise, at night we prioritise pedestrians when
-    many pedestrians are waiting and the light is green; during rush
-    hour we hold pedestrians when there are many vehicles and few
-    pedestrians.  Red lights always yield STOP.  Green lights yield
-    GO if pedestrians have priority and there are no vehicles; else
-    STOP.  Yellow yields STOP if pedestrians present, OFF otherwise.
+    The goal is to display instructions for pedestrians based on the
+    vehicle traffic light and scenario flags.  Emergency vehicles
+    always override with a STOP instruction.  During night and green
+    lights we prioritise pedestrians if many are waiting (scenario
+    ``scenario_1_night_ped``); during rush hour and red lights we
+    prioritise vehicles by switching the boards off (scenario
+    ``scenario_2_rush_hold``).  Otherwise, the base logic is
+    inverted from a typical car‑centric view: a green or yellow light
+    means pedestrians must STOP, and a red light means pedestrians
+    may GO (but only if there are pedestrians waiting).  Unknown
+    lights fall back to conservative behaviour.
     """
+    # Emergency vehicle detected overrides all other logic
     if flags.get("ambulance", False):
         return ("STOP", "scenario_3_emergency")
+    # Pedestrian priority: many pedestrians waiting on green light
     if flags.get("night", False) and ped_count >= 30 and veh_count <= 2 and tl_color == "green":
         return ("STOP", "scenario_1_night_ped")
+    # Vehicle priority: heavy traffic during red light
     if flags.get("rush", False) and (5 <= ped_count <= 10) and veh_count >= 20 and tl_color == "red":
         return ("OFF", "scenario_2_rush_hold")
-    action = "OFF"
+    # Base logic for pedestrians
+    if tl_color == "green" or tl_color == "yellow":
+        # Vehicles have priority; pedestrians stop regardless of counts
+        return ("STOP", "baseline")
     if tl_color == "red":
-        action = "STOP"
-    elif tl_color == "green":
-        if ped_count > 0 and veh_count > 0:
-            action = "STOP"
-        elif ped_count > 0:
-            action = "GO"
-    elif tl_color == "yellow":
-        action = "STOP" if ped_count > 0 else "OFF"
-    return (action, "baseline")
+        # Vehicles stop; pedestrians may go if any are waiting
+        return ("GO", "baseline") if ped_count > 0 else ("OFF", "baseline")
+    # Unknown traffic light state
+    if ped_count > 0 and veh_count > 0:
+        return ("STOP", "baseline")
+    return ("OFF", "baseline")
 
 
 # --------------------- VEHICLE AND PEDESTRIAN DETECTION ---------------------
