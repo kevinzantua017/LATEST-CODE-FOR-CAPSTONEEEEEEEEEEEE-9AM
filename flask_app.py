@@ -554,3 +554,76 @@ if __name__ == "__main__":
     # pipeline.  If you instead run ``python3 app.py`` on the Pi, the
     # pipeline will call start_http_server() directly.
     start_http_server(host="0.0.0.0", port=5000)
+
+
+async function loadAnalytics() {
+  try {
+    const res = await fetch(BASE_URL + "/api/analytics");
+    const rows = await res.json();
+
+    const now = Date.now();
+    const byMinute = new Map(rows.map(r => [r.minute, r]));
+    const padded = [];
+    for (let i = 9; i >= 0; i--) {
+      const d = new Date(now - i * 60000);
+      const label = d.toISOString().slice(0, 16).replace('T', ' ');
+      padded.push(byMinute.get(label) || {minute: label, avg_ped: 0, avg_veh: 0, go: 0, stop: 0, off: 0});
+    }
+
+    const labels = padded.map(r => r.minute.slice(11));
+    const ped = padded.map(r => r.avg_ped);
+    const veh = padded.map(r => r.avg_veh);
+    const go = padded.map(r => r.go);
+    const stop = padded.map(r => r.stop);
+    const off = padded.map(r => r.off);
+
+    // Update density chart
+    if (!densityChart) {
+      densityChart = new Chart(document.getElementById('densityChart'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            { label: 'Avg Pedestrians', data: ped },
+            { label: 'Avg Vehicles', data: veh }
+          ]
+        },
+        options: { responsive: true, maintainAspectRatio: false }
+      });
+    } else {
+      densityChart.data.labels = labels;
+      densityChart.data.datasets[0].data = ped;
+      densityChart.data.datasets[1].data = veh;
+      densityChart.update();
+    }
+
+    // Update decision chart
+    if (!decisionChart) {
+      decisionChart = new Chart(document.getElementById('decisionChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { label: 'GO', data: go },
+            { label: 'STOP', data: stop },
+            { label: 'OFF', data: off }
+          ]
+        },
+        options: { responsive: true, maintainAspectRatio: false }
+      });
+    } else {
+      decisionChart.data.labels = labels;
+      decisionChart.data.datasets[0].data = go;
+      decisionChart.data.datasets[1].data = stop;
+      decisionChart.data.datasets[2].data = off;
+      decisionChart.update();
+    }
+  } catch (e) {
+    console.error("Analytics load failed:", e);
+  }
+}
+
+// Call loadAnalytics immediately on load and set interval
+loadAnalytics();
+setInterval(loadAnalytics, 60000); // Update every minute
+
