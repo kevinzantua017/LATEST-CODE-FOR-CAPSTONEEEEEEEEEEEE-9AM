@@ -1,690 +1,344 @@
 <!DOCTYPE html>
-
 <html lang="en">
-
 <head>
-
   <meta charset="UTF-8" />
-
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-
   <title>AI-Driven LED Board Optimization</title>
-
   <link rel="stylesheet" href="style.css"/>
-
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
-
 </head>
-
 <body>
-
 <div class="page-wrapper">
 
-
-
-  <!-- ================= LOGIN PAGE ================= -->
-
+  <!-- LOGIN PAGE (unchanged) -->
   <div id="loginPage" class="login-body" style="display:flex;">
-
     <div class="login-container">
-
       <h2>AI-Driven LED Board System</h2>
-
       <input id="user" type="text" placeholder="Username" autocomplete="username"/>
-
       <input id="pass" type="password" placeholder="Password" autocomplete="current-password"/>
-
       <button onclick="doLogin()">Login</button>
-
       <p class="note">For demo: use any username & password</p>
-
     </div>
-
   </div>
 
-
-
-  <!-- ================= DASHBOARD PAGE ================= -->
-
+  <!-- DASHBOARD PAGE -->
   <div id="dashboardPage" style="display:none;">
-
-
-
-    <!-- Navbar -->
-
     <header>
-
       <div class="header-container">
-
         <div class="logo"><img src="images/Adamson.png" alt="Logo"></div>
-
         <h1>LED-Board Optimization</h1>
-
         <nav>
-
           <a href="#" data-tab="dashboard" onclick="openTab('dashboard')">Dashboard</a>
-
           <a href="#" data-tab="analytics" onclick="openTab('analytics')">Analytics</a>
-
           <a href="#" data-tab="scenarios" onclick="openTab('scenarios')">Scenarios</a>
-
           <a href="#" data-tab="logs" onclick="openTab('logs')">Archive</a>
-
         </nav>
-
         <button class="logout-btn" onclick="logout()">Logout</button>
-
       </div>
-
     </header>
 
-
-
-    <!-- Dashboard -->
-
     <section id="dashboard" class="container active">
-
       <h2>📡 Live Monitoring — Adamson University San Marcelino St.</h2>
-
-
-
       <div class="grid-dashboard">
-
         <div class="card">
-
           <h3>Pedestrian Camera</h3>
-
           <div class="camera-feed"><img id="camPed" alt="Pedestrian Camera" loading="eager"></div>
-
         </div>
-
-
-
         <div class="card">
-
           <h3>Vehicle Camera</h3>
-
           <div class="camera-feed"><img id="camVeh" alt="Vehicle Camera" loading="eager"></div>
-
         </div>
-
-
-
         <div class="card">
-
           <h3>Traffic Light Detector</h3>
-
           <div class="camera-feed"><img id="camTL" alt="Traffic Light Camera" loading="eager"></div>
-
         </div>
-
       </div>
-
-
 
       <div class="grid-2" style="margin-top:1rem;">
-
-        <!-- System Status -->
-
         <div class="card status" id="systemCard">
-
           <p><strong>System Status:</strong> <span id="sysOnline" class="status-text offline">OFFLINE</span></p>
-
           <p><strong>Current Decision:</strong> <span id="sysDecision">—</span></p>
-
           <p id="sysLine">TL: — | 🧍 0 | 🚗 0 | Nearest: 0.0 m | Speed: 0.0 m/s (0 km/h)</p>
-
         </div>
-
-
-
-        <!-- Scenario summary (no LED labels) -->
 
         <div class="card">
-
           <h3>Boards & Scenario</h3>
-
           <p>Scenario: <strong id="scenarioTitle">—</strong></p>
-
           <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:.5rem;">
-
             <span class="status-text offline" id="pillVeh">Vehicle Priority</span>
-
             <span class="status-text offline" id="pillPed">Pedestrian Priority</span>
-
             <span class="status-text offline" id="pillEmg">Emergency Vehicle</span>
-
           </div>
-
           <p style="margin-top:.75rem;">Current Light: <span class="light" id="lightBadge">—</span></p>
-
         </div>
-
       </div>
-
     </section>
-
-
-
-    <!-- Analytics -->
 
     <section id="analytics" class="container">
-
       <h2>📊 Analytics</h2>
-
       <div class="grid-2">
-
         <div class="card" style="height:360px;">
-
           <h3>Vehicle & Pedestrian Density (last 10 minutes)</h3>
-
           <canvas id="densityChart"></canvas>
-
         </div>
-
         <div class="card" style="height:360px;">
-
           <h3>Decision Breakdown (GO/STOP/OFF)</h3>
-
           <canvas id="decisionChart"></canvas>
-
         </div>
-
       </div>
-
     </section>
-
-
-
-    <!-- Scenarios -->
 
     <section id="scenarios" class="container">
-
       <h2>🚦 Scenarios</h2>
-
       <p><strong>LED Board:</strong> <span id="scenarioMessage2">—</span></p>
 
-
-
       <div class="card scenario-card">
-
         <div class="scenario-header">
-
           <h3>Vehicle Priority</h3>
-
           <div class="status-control">
-
             <span class="status-text offline" id="status2">Offline</span>
-
             <label class="switch"><input type="checkbox" onchange="toggleScenario(this)"><span class="slider"></span></label>
-
           </div>
-
         </div>
-
         <ul>
-
           <li><strong>Pedestrian Camera:</strong> 5–10 students waiting</li>
-
           <li><strong>Vehicle Camera:</strong> Heavy traffic 20+ Vehicles</li>
-
           <li><strong>Traffic Light:</strong> Red</li>
-
         </ul>
-
         <p><strong>YOLOv8 Action:</strong> Vehicles priority to ease congestion.<br>
-
            LED: <em>“Vehicles Priority – Wait to Cross”</em></p>
-
       </div>
 
-
-
       <div class="card scenario-card">
-
         <div class="scenario-header">
-
           <h3>Pedestrian Priority</h3>
-
           <div class="status-control">
-
             <span class="status-text offline" id="status1">Offline</span>
-
             <label class="switch"><input type="checkbox" onchange="toggleScenario(this)"><span class="slider"></span></label>
-
           </div>
-
         </div>
-
         <ul>
-
           <li><strong>Pedestrian Camera:</strong> 30+ waiting</li>
-
           <li><strong>Vehicle Camera:</strong> 0–5 Vehicles</li>
-
           <li><strong>Traffic Light:</strong> Green</li>
-
         </ul>
-
         <p><strong>YOLOv8 Action:</strong> Prioritize pedestrians.<br>
-
            LED: <em>“Prepare to Stop – Pedestrians Crossing”</em></p>
-
       </div>
-
-
 
       <div class="card scenario-card">
-
         <div class="scenario-header">
-
           <h3>Emergency Vehicle Detected</h3>
-
           <div class="status-control">
-
             <span class="status-text offline" id="status3">Offline</span>
-
             <label class="switch"><input type="checkbox" onchange="toggleScenario(this)"><span class="slider"></span></label>
-
           </div>
-
         </div>
-
         <ul>
-
           <li><strong>Pedestrian Camera:</strong> ~20 waiting</li>
-
           <li><strong>Vehicle Camera:</strong> Ambulance with siren</li>
-
           <li><strong>Traffic Light:</strong> Yellow → Red</li>
-
         </ul>
-
         <p><strong>YOLOv8 Action:</strong> Override for ambulance right-of-way.</p>
-
       </div>
-
     </section>
-
-
-
-    <!-- Logs -->
 
     <section id="logs" class="container">
-
       <h2>🗂️ System Logs</h2>
-
-
-
       <div style="margin: 0 0 .75rem 0; display:flex; gap:.5rem;">
-
         <button onclick="deleteSelected()" class="logout-btn" style="background:#0a7;">Delete Selected</button>
-
         <button onclick="clearAll()" class="logout-btn" style="background:#a00;">Clear All</button>
-
       </div>
-
-
-
       <div class="table-scroll">
-
         <table>
-
           <thead>
-
             <tr>
-
               <th><input type="checkbox" id="selAll" onchange="toggleSelectAll(this)"></th>
-
               <th>Time</th>
-
               <th>Event</th>
-
               <th>Status (Boards)</th>
-
             </tr>
-
           </thead>
-
           <tbody></tbody>
-
         </table>
-
       </div>
-
     </section>
 
-
-
-    <!-- Footer -->
-
     <footer>
-
       <p>© 2025 Adamson University | AI-Driven LED Board Optimization</p>
-
     </footer>
+  </div>
+</div>
 
-
-
-  </div> <!-- /dashboardPage -->
-
-
-
-</div> <!-- /page-wrapper -->
-
-
-
-<!-- ================= JAVASCRIPT ================= -->
-
+<!-- JS -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-
 <script>
-
-  const BASE_URL = window.location.origin;  // auto: http://192.168.137.13:500
-
-
-
-
-
-
+  const BASE_URL = window.location.origin;
 
   // ========= LOGIN =========
-
   function doLogin(){
-
     const u = user.value.trim(), p = pass.value.trim();
-
     if (!u || !p) { alert("Enter any username & password"); return; }
-
     localStorage.setItem("loggedInUser", u);
-
     showDashboard();
-
   }
-
   function logout(){
-
     localStorage.removeItem("loggedInUser");
-
     localStorage.removeItem("activeTab");
-
     showLogin();
-
   }
-
   function showDashboard(){
-
     loginPage.style.display = "none";
-
     dashboardPage.style.display = "block";
-
     setCamSrcs();
-
     openTab(localStorage.getItem("activeTab") || "dashboard");
-
   }
-
   function showLogin(){
-
     loginPage.style.display = "flex";
-
     dashboardPage.style.display = "none";
-
   }
-
   window.addEventListener("load", () => {
-
     if (localStorage.getItem("loggedInUser")) showDashboard();
-
     else showLogin();
-
   });
 
-
-
   // ========= TABS =========
-
   let densityChart, decisionChart, analyticsTimer=null, logsTimer=null;
-
   function openTab(tabId) {
-
     document.querySelectorAll('.container').forEach(s => s.classList.remove('active'));
-
     document.getElementById(tabId)?.classList.add('active');
 
-
-
     document.querySelectorAll('header nav a').forEach(a => {
-
       a.classList.toggle('active', a.getAttribute('data-tab') === tabId);
-
     });
-
-
 
     localStorage.setItem("activeTab", tabId);
 
-
-
     if (tabId === "analytics") {
-
-      loadAnalytics();
-
+      loadAnalytics(); // initial load
       if (!analyticsTimer) analyticsTimer = setInterval(loadAnalytics, 60000);
-
     } else { if (analyticsTimer) { clearInterval(analyticsTimer); analyticsTimer = null; } }
 
-
-
     if (tabId === "logs") {
-
       loadArchive();
-
       if (!logsTimer) logsTimer = setInterval(loadArchive, 30000);
-
     } else { if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } }
-
   }
-
-
 
   // ========= CAMERA STREAMS =========
-
   function setCamSrcs() {
-
     camPed.src = BASE_URL + "/stream/ped";
-
     camVeh.src = BASE_URL + "/stream/veh";
-
     camTL.src  = BASE_URL + "/stream/tl";
-
   }
-
-
 
   // ========= ONLINE/OFFLINE via Socket.IO + poll fallback =========
-
   let lastStatusTs = 0;
-
   const ONLINE_TIMEOUT_MS = 5000;
 
-
-
   function setSysOnline(online){
-
     const el = document.getElementById("sysOnline");
-
     el.textContent = online ? "ONLINE" : "OFFLINE";
-
     el.classList.toggle("active", online);
-
     el.classList.toggle("offline", !online);
-
   }
-
   setInterval(()=>{ setSysOnline(Date.now() - lastStatusTs < ONLINE_TIMEOUT_MS); }, 1000);
 
-
-
   function renderStatus(s){
-
     lastStatusTs = Date.now();
-
-
-
-    // Current Decision text (with scenario if present)
-
     sysDecision.textContent = `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
 
-
-
-    // Dashboard used to read alternate field names — support both
-
     const nearest = (s.nearest_vehicle_distance_m ?? s.nearest_m ?? 0);
-
     const avg_mps = (s.avg_vehicle_speed_mps ?? s.avg_mps ?? 0);
 
-
-
     sysLine.innerHTML =
-
       `TL: ${(s.tl_color||'').toUpperCase()} | 🧍 ${s.ped_count} | 🚗 ${s.veh_count} | `+
-
       `Nearest: ${Number(nearest).toFixed(1)} m | `+
-
       `Speed: ${Number(avg_mps).toFixed(1)} m/s (`+
-
       `${(Number(avg_mps)*3.6).toFixed(0)} km/h)`;
 
-
-
-    // Scenario title mapping
-
     const titleMap = {
-
       scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
-
       scenario_1_night_ped: "Pedestrians Priority",
-
       scenario_3_emergency: "Emergency Vehicle Detected",
-
       baseline: "Baseline"
-
     };
-
     const scenKey = s.scenario || "baseline";
-
     scenarioTitle.textContent = titleMap[scenKey] || scenKey;
 
-
-
-    // Pills (Active for current scenario)
-
     function pill(el, on){ el.classList.toggle("active", on); el.classList.toggle("offline", !on); }
-
     pill(pillVeh, scenKey === "scenario_2_rush_hold");
-
     pill(pillPed, scenKey === "scenario_1_night_ped");
-
     pill(pillEmg, scenKey === "scenario_3_emergency");
 
-
-
-    // Light badge
-
     lightBadge.className = 'light ' + (s.tl_color||'');
-
     lightBadge.textContent = (s.tl_color||'').toUpperCase();
 
-
-
-    // Also show scenario text in Scenarios page header
-
     const scenTextMap = {
-
       scenario_1_night_ped: "Prepare to Stop – Pedestrians Crossing",
-
       scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
-
       scenario_3_emergency: "Emergency Vehicle Passing – Please Wait",
-
       baseline: (s.action === "GO" ? "Safe to Cross" : (s.action === "STOP" ? "Stop" : "Standby"))
-
     };
-
     scenarioMessage2.textContent = scenTextMap[scenKey];
-
   }
 
-
-
+  // ========= SOCKET.IO =========
   let socket = null;
-
   try {
-
     socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
-
     socket.on("status", renderStatus);
 
+    // NEW: real-time analytics push from server
+    socket.on("analytics", (rows) => {
+      updateAnalyticsCharts(rows);
+    });
   } catch(e){ console.warn("Socket init failed:", e); }
 
-
-
   // Poll fallback every 2s
-
   setInterval(async ()=>{
-
     try{
-
       const r = await fetch(BASE_URL + "/api/status_now", {cache: "no-store"});
-
       const s = await r.json();
-
       renderStatus(s);
-
     }catch(e){}
-
   }, 2000);
 
-
-
   // ========= ANALYTICS =========
-
- async function loadAnalytics() {
-  try {
-    const res = await fetch(BASE_URL + "/api/analytics");
-    const rows = await res.json();
-
+  function updateAnalyticsCharts(rows){
+    // pad to last 10 minutes for nice aligned x-axis
     const now = Date.now();
     const byMinute = new Map(rows.map(r => [r.minute, r]));
     const padded = [];
-    for (let i = 9; i >= 0; i--) {
-      const d = new Date(now - i * 60000);
-      const label = d.toISOString().slice(0, 16).replace('T', ' ');
-      padded.push(byMinute.get(label) || {minute: label, avg_ped: 0, avg_veh: 0, go: 0, stop: 0, off: 0});
+    for (let i=9;i>=0;i--){
+      const d = new Date(now - i*60000);
+      const label = d.toISOString().slice(0,16).replace('T',' ');
+      padded.push(byMinute.get(label) || {minute: label, avg_ped:0, avg_veh:0, go:0, stop:0, off:0});
     }
 
     const labels = padded.map(r => r.minute.slice(11));
     const ped = padded.map(r => r.avg_ped);
     const veh = padded.map(r => r.avg_veh);
-    const go = padded.map(r => r.go);
-    const stop = padded.map(r => r.stop);
+    const go  = padded.map(r => r.go);
+    const stop= padded.map(r => r.stop);
     const off = padded.map(r => r.off);
 
-    // Update density chart
-    if (!densityChart) {
+    const chartOpts = {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,           // no animation → no flicker
+      transitions: { active: { animation: false } },
+    };
+
+    if (!densityChart){
       densityChart = new Chart(document.getElementById('densityChart'), {
         type: 'bar',
-        data: {
-          labels,
-          datasets: [
-            { label: 'Avg Pedestrians', data: ped },
-            { label: 'Avg Vehicles', data: veh }
-          ]
-        },
-        options: { responsive: true, maintainAspectRatio: false }
+        data: { labels, datasets: [
+          { label: 'Avg Pedestrians', data: ped },
+          { label: 'Avg Vehicles', data: veh }
+        ]},
+        options: chartOpts
       });
     } else {
       densityChart.data.labels = labels;
@@ -693,19 +347,15 @@
       densityChart.update();
     }
 
-    // Update decision chart
-    if (!decisionChart) {
+    if (!decisionChart){
       decisionChart = new Chart(document.getElementById('decisionChart'), {
         type: 'line',
-        data: {
-          labels,
-          datasets: [
-            { label: 'GO', data: go },
-            { label: 'STOP', data: stop },
-            { label: 'OFF', data: off }
-          ]
-        },
-        options: { responsive: true, maintainAspectRatio: false }
+        data: { labels, datasets: [
+          { label: 'GO', data: go },
+          { label: 'STOP', data: stop },
+          { label: 'OFF', data: off }
+        ]},
+        options: chartOpts
       });
     } else {
       decisionChart.data.labels = labels;
@@ -714,196 +364,105 @@
       decisionChart.data.datasets[2].data = off;
       decisionChart.update();
     }
-  } catch (e) {
-    console.error("Analytics load failed:", e);
-  }
-}
-
-// Call loadAnalytics immediately on load and set interval
-loadAnalytics();
-setInterval(loadAnalytics, 60000); // Update every minute
   }
 
+  async function loadAnalytics(){
+    try {
+      const res = await fetch(BASE_URL + "/api/analytics", {cache:"no-store"});
+      const rows = await res.json();
+      updateAnalyticsCharts(rows);
+    } catch (e) {
+      console.error("Analytics load failed:", e);
+    }
+  }
 
-
-  // ========= ARCHIVE (descending + manage) =========
-
+  // ========= ARCHIVE (unchanged except minor formatting) =========
   function toggleSelectAll(cb){
-
     document.querySelectorAll("#logs tbody input[type=checkbox]").forEach(x => x.checked = cb.checked);
-
   }
-
-
 
   async function deleteSelected(){
-
     const ids = Array.from(document.querySelectorAll("#logs tbody input[type=checkbox]:checked"))
-
       .map(cb => Number(cb.dataset.id));
-
     if (!ids.length) { alert("Select at least one row."); return; }
-
     if (!confirm(`Delete ${ids.length} selected row(s)?`)) return;
-
     await fetch(BASE_URL + "/api/logs/delete", {
-
       method: "POST",
-
       headers: {"Content-Type":"application/json"},
-
       body: JSON.stringify({ids})
-
     });
-
     await loadArchive();
-
   }
-
-
 
   async function clearAll(){
-
     if (!confirm("Delete ALL log rows?")) return;
-
     await fetch(BASE_URL + "/api/logs/clear", {
-
       method: "POST",
-
       headers: {"Content-Type":"application/json"},
-
       body: JSON.stringify({all:true})
-
     });
-
     await loadArchive();
-
   }
 
-
-
   async function loadArchive(limit=200){
-
     try {
-
       const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
-
       const rows = await res.json(); // DESC
-
       const tbody = document.querySelector("#logs tbody");
-
       if (!tbody) return;
-
       tbody.innerHTML = "";
-
       rows.forEach(r => {
-
         const tr = document.createElement("tr");
-
         const t = new Date(r.ts * 1000).toLocaleTimeString();
-
         tr.innerHTML = `
-
           <td><input type="checkbox" data-id="${r.id}"></td>
-
           <td>${t}</td>
-
           <td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td>
-
           <td>Veh: ${r.board_veh||r.action} | Ped-L: ${r.board_ped_l||r.action} | Ped-R: ${r.board_ped_r||r.action}</td>`;
-
         tbody.appendChild(tr);
-
       });
-
       const master = document.getElementById("selAll");
-
       if (master) master.checked = false;
-
     } catch (e) {
-
       console.error("Archive load failed:", e);
-
     }
+  }
 
-
-
-
-  // ========= Scenario toggle (calls backend) =========
-
+  // ========= Scenario toggle (unchanged) =========
   async function toggleScenario(checkbox) {
-
     const statusText = checkbox.closest('.scenario-header').querySelector('.status-text');
-
     const active = checkbox.checked;
-
     statusText.textContent = active ? "Active" : "Offline";
-
     statusText.classList.toggle("active", active);
-
     statusText.classList.toggle("offline", !active);
-
-
 
     const title = checkbox.closest('.scenario-card').querySelector('h3')?.textContent.trim().toLowerCase();
 
-
-
     let payload = {};
-
     if (title.includes("vehicle priority")) {
-
       payload = { scenario: active ? "scenario_2_rush_hold" : "baseline",
-
                   board_veh: active ? "ON" : "OFF" };
-
     } else if (title.includes("pedestrian priority")) {
-
       payload = { scenario: active ? "scenario_1_night_ped" : "baseline",
-
                   board_ped_l: active ? "ON" : "OFF",
-
                   board_ped_r: active ? "ON" : "OFF" };
-
     } else if (title.includes("emergency")) {
-
       payload = { scenario: active ? "scenario_3_emergency" : "baseline",
-
                   board_veh: active ? "ON" : "OFF",
-
                   board_ped_l: "OFF",
-
                   board_ped_r: "OFF" };
-
     }
-
-
 
     try {
-
       await fetch(BASE_URL + "/api/set_scenario", {
-
         method: "POST",
-
         headers: {"Content-Type": "application/json"},
-
         body: JSON.stringify(payload)
-
       });
-
-      // server broadcasts an updated "status"
-
     } catch(e) {
-
       console.error("Failed to set scenario:", e);
-
     }
-
   }
-
 </script>
-
 </body>
-
 </html>
-
