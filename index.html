@@ -371,6 +371,9 @@ async function loadAnalytics() {
     const res = await fetch(BASE_URL + "/api/analytics");
     const rows = await res.json();
 
+    // Log the fetched rows to check the data
+    console.log("Fetched Analytics Data: ", rows);
+
     const now = Date.now();
     const byMinute = new Map(rows.map(r => [r.minute, r]));
     const padded = [];
@@ -386,6 +389,9 @@ async function loadAnalytics() {
     const go = padded.map(r => r.go);
     const stop = padded.map(r => r.stop);
     const off = padded.map(r => r.off);
+
+    // Check the data that will be used for the graph
+    console.log("Prepared Graph Data: ", {labels, ped, veh, go, stop, off});
 
     // Update the density chart
     if (!densityChart) {
@@ -438,6 +444,8 @@ async function loadAnalytics() {
   } catch (e) {
     console.error("Analytics load failed:", e);
   }
+}
+
 }
 
   // ========= Scenario toggle (unchanged) =========
