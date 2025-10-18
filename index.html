@@ -366,67 +366,79 @@
     }
   }
 
-  async function loadAnalytics(){
-    try {
-      const res = await fetch(BASE_URL + "/api/analytics", {cache:"no-store"});
-      const rows = await res.json();
-      updateAnalyticsCharts(rows);
-    } catch (e) {
-      console.error("Analytics load failed:", e);
+async function loadAnalytics() {
+  try {
+    const res = await fetch(BASE_URL + "/api/analytics");
+    const rows = await res.json();
+
+    const now = Date.now();
+    const byMinute = new Map(rows.map(r => [r.minute, r]));
+    const padded = [];
+    for (let i = 9; i >= 0; i--) {
+      const d = new Date(now - i * 60000);
+      const label = d.toISOString().slice(0, 16).replace('T', ' ');
+      padded.push(byMinute.get(label) || {minute: label, avg_ped: 0, avg_veh: 0, go: 0, stop: 0, off: 0});
     }
-  }
 
-  // ========= ARCHIVE (unchanged except minor formatting) =========
-  function toggleSelectAll(cb){
-    document.querySelectorAll("#logs tbody input[type=checkbox]").forEach(x => x.checked = cb.checked);
-  }
+    const labels = padded.map(r => r.minute.slice(11));
+    const ped = padded.map(r => r.avg_ped);
+    const veh = padded.map(r => r.avg_veh);
+    const go = padded.map(r => r.go);
+    const stop = padded.map(r => r.stop);
+    const off = padded.map(r => r.off);
 
-  async function deleteSelected(){
-    const ids = Array.from(document.querySelectorAll("#logs tbody input[type=checkbox]:checked"))
-      .map(cb => Number(cb.dataset.id));
-    if (!ids.length) { alert("Select at least one row."); return; }
-    if (!confirm(`Delete ${ids.length} selected row(s)?`)) return;
-    await fetch(BASE_URL + "/api/logs/delete", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ids})
-    });
-    await loadArchive();
-  }
-
-  async function clearAll(){
-    if (!confirm("Delete ALL log rows?")) return;
-    await fetch(BASE_URL + "/api/logs/clear", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({all:true})
-    });
-    await loadArchive();
-  }
-
-  async function loadArchive(limit=200){
-    try {
-      const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
-      const rows = await res.json(); // DESC
-      const tbody = document.querySelector("#logs tbody");
-      if (!tbody) return;
-      tbody.innerHTML = "";
-      rows.forEach(r => {
-        const tr = document.createElement("tr");
-        const t = new Date(r.ts * 1000).toLocaleTimeString();
-        tr.innerHTML = `
-          <td><input type="checkbox" data-id="${r.id}"></td>
-          <td>${t}</td>
-          <td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td>
-          <td>Veh: ${r.board_veh||r.action} | Ped-L: ${r.board_ped_l||r.action} | Ped-R: ${r.board_ped_r||r.action}</td>`;
-        tbody.appendChild(tr);
+    // Update the density chart
+    if (!densityChart) {
+      densityChart = new Chart(document.getElementById('densityChart'), {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [
+            { label: 'Avg Pedestrians', data: ped, backgroundColor: 'rgba(0, 255, 0, 0.5)' },
+            { label: 'Avg Vehicles', data: veh, backgroundColor: 'rgba(0, 0, 255, 0.5)' }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false
+        }
       });
-      const master = document.getElementById("selAll");
-      if (master) master.checked = false;
-    } catch (e) {
-      console.error("Archive load failed:", e);
+    } else {
+      densityChart.data.labels = labels;
+      densityChart.data.datasets[0].data = ped;
+      densityChart.data.datasets[1].data = veh;
+      densityChart.update();
     }
+
+    // Update the decision chart
+    if (!decisionChart) {
+      decisionChart = new Chart(document.getElementById('decisionChart'), {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [
+            { label: 'GO', data: go, borderColor: 'green', fill: false },
+            { label: 'STOP', data: stop, borderColor: 'red', fill: false },
+            { label: 'OFF', data: off, borderColor: 'gray', fill: false }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false
+        }
+      });
+    } else {
+      decisionChart.data.labels = labels;
+      decisionChart.data.datasets[0].data = go;
+      decisionChart.data.datasets[1].data = stop;
+      decisionChart.data.datasets[2].data = off;
+      decisionChart.update();
+    }
+
+  } catch (e) {
+    console.error("Analytics load failed:", e);
   }
+}
 
   // ========= Scenario toggle (unchanged) =========
   async function toggleScenario(checkbox) {
