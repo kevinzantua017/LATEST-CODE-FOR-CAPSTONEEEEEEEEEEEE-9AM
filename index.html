@@ -9,6 +9,7 @@
 </head>
 <body>
 <div class="page-wrapper">
+
   <!-- ================= LOGIN PAGE ================= -->
   <div id="loginPage" class="login-body" style="display:flex;">
     <div class="login-container">
@@ -40,18 +41,15 @@
     <!-- Dashboard -->
     <section id="dashboard" class="container active">
       <h2>📡 Live Monitoring — Adamson University San Marcelino St.</h2>
-
       <div class="grid-dashboard">
         <div class="card">
           <h3>Pedestrian Camera</h3>
           <div class="camera-feed"><img id="camPed" alt="Pedestrian Camera" loading="eager"></div>
         </div>
-
         <div class="card">
           <h3>Vehicle Camera</h3>
           <div class="camera-feed"><img id="camVeh" alt="Vehicle Camera" loading="eager"></div>
         </div>
-
         <div class="card">
           <h3>Traffic Light Detector</h3>
           <div class="camera-feed"><img id="camTL" alt="Traffic Light Camera" loading="eager"></div>
@@ -154,7 +152,6 @@
     <!-- Logs -->
     <section id="logs" class="container">
       <h2>🗂️ System Logs</h2>
-
       <div style="margin: 0 0 .75rem 0; display:flex; gap:.5rem;">
         <button onclick="deleteSelected()" class="logout-btn" style="background:#0a7;">Delete Selected</button>
         <button onclick="clearAll()" class="logout-btn" style="background:#a00;">Clear All</button>
@@ -190,67 +187,141 @@
 <script>
   const BASE_URL = window.location.origin;
 
-  // ========== Real-time Analytics Update ==========
+  // ========= LOGIN =========
+  function doLogin(){
+    const u = user.value.trim(), p = pass.value.trim();
+    if (!u || !p) { alert("Enter any username & password"); return; }
+    localStorage.setItem("loggedInUser", u);
+    showDashboard();
+  }
+  function logout(){
+    localStorage.removeItem("loggedInUser");
+    localStorage.removeItem("activeTab");
+    showLogin();
+  }
+  function showDashboard(){
+    loginPage.style.display = "none";
+    dashboardPage.style.display = "block";
+    setCamSrcs();
+    openTab(localStorage.getItem("activeTab") || "dashboard");
+  }
+  function showLogin(){
+    loginPage.style.display = "flex";
+    dashboardPage.style.display = "none";
+  }
+  window.addEventListener("load", () => {
+    if (localStorage.getItem("loggedInUser")) showDashboard();
+    else showLogin();
+  });
 
-  let densityChart, decisionChart, analyticsTimer = null, logsTimer = null;
-  
+  // ========= TABS =========
+  let densityChart, decisionChart, analyticsTimer=null, logsTimer=null;
   function openTab(tabId) {
     document.querySelectorAll('.container').forEach(s => s.classList.remove('active'));
     document.getElementById(tabId)?.classList.add('active');
-
     document.querySelectorAll('header nav a').forEach(a => {
       a.classList.toggle('active', a.getAttribute('data-tab') === tabId);
     });
-
     localStorage.setItem("activeTab", tabId);
-
     if (tabId === "analytics") {
       loadAnalytics();
       if (!analyticsTimer) analyticsTimer = setInterval(loadAnalytics, 60000);
-    } else { 
-      if (analyticsTimer) { clearInterval(analyticsTimer); analyticsTimer = null; } 
-    }
-
+    } else { if (analyticsTimer) { clearInterval(analyticsTimer); analyticsTimer = null; } }
     if (tabId === "logs") {
       loadArchive();
       if (!logsTimer) logsTimer = setInterval(loadArchive, 30000);
-    } else { 
-      if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } 
-    }
+    } else { if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } }
   }
 
-  // ========== Camera Stream Fix ==========
-
+  // ========= CAMERA STREAMS =========
   function setCamSrcs() {
     camPed.src = BASE_URL + "/stream/ped";
     camVeh.src = BASE_URL + "/stream/veh";
-    camTL.src  = BASE_URL + "/stream/tl";
+    camTL.src = BASE_URL + "/stream/tl";
   }
 
-  // ========== Real-time Analytics Update ==========
+  // ========= ONLINE/OFFLINE via Socket.IO + poll fallback =========
+  let lastStatusTs = 0;
+  const ONLINE_TIMEOUT_MS = 5000;
+  function setSysOnline(online){
+    const el = document.getElementById("sysOnline");
+    el.textContent = online ? "ONLINE" : "OFFLINE";
+    el.classList.toggle("active", online);
+    el.classList.toggle("offline", !online);
+  }
+  setInterval(()=>{ setSysOnline(Date.now() - lastStatusTs < ONLINE_TIMEOUT_MS); }, 1000);
 
-  async function loadAnalytics() {
+  function renderStatus(s){
+    lastStatusTs = Date.now();
+    sysDecision.textContent = `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
+    const nearest = (s.nearest_vehicle_distance_m ?? s.nearest_m ?? 0);
+    const avg_mps = (s.avg_vehicle_speed_mps ?? s.avg_mps ?? 0);
+    sysLine.innerHTML =
+      `TL: ${(s.tl_color||'').toUpperCase()} | 🧍 ${s.ped_count} | 🚗 ${s.veh_count} | `+
+      `Nearest: ${Number(nearest).toFixed(1)} m | `+
+      `Speed: ${Number(avg_mps).toFixed(1)} m/s (`+
+      `${(Number(avg_mps)*3.6).toFixed(0)} km/h)`;
+
+    const titleMap = {
+      scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
+      scenario_1_night_ped: "Pedestrians Priority",
+      scenario_3_emergency: "Emergency Vehicle Detected",
+      baseline: "Baseline"
+    };
+    const scenKey = s.scenario || "baseline";
+    scenarioTitle.textContent = titleMap[scenKey] || scenKey;
+
+    function pill(el, on){ el.classList.toggle("active", on); el.classList.toggle("offline", !on); }
+    pill(pillVeh, scenKey === "scenario_2_rush_hold");
+    pill(pillPed, scenKey === "scenario_1_night_ped");
+    pill(pillEmg, scenKey === "scenario_3_emergency");
+
+    lightBadge.className = 'light ' + (s.tl_color||'');
+    lightBadge.textContent = (s.tl_color||'').toUpperCase();
+
+    const scenTextMap = {
+      scenario_1_night_ped: "Prepare to Stop – Pedestrians Crossing",
+      scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
+      scenario_3_emergency: "Emergency Vehicle Passing – Please Wait",
+      baseline: (s.action === "GO" ? "Safe to Cross" : (s.action === "STOP" ? "Stop" : "Standby"))
+    };
+    scenarioMessage2.textContent = scenTextMap[scenKey];
+  }
+
+  let socket = null;
+  try {
+    socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
+    socket.on("status", renderStatus);
+  } catch(e){ console.warn("Socket init failed:", e); }
+
+  setInterval(async ()=>{
+    try{
+      const r = await fetch(BASE_URL + "/api/status_now", {cache: "no-store"});
+      const s = await r.json();
+      renderStatus(s);
+    }catch(e){}
+  }, 2000);
+
+  // ========= ANALYTICS =========
+  async function loadAnalytics(){
     try {
       const res = await fetch(BASE_URL + "/api/analytics");
       const rows = await res.json();
-
       const now = Date.now();
       const byMinute = new Map(rows.map(r => [r.minute, r]));
       const padded = [];
-      for (let i = 9; i >= 0; i--) {
-        const d = new Date(now - i * 60000);
-        const label = d.toISOString().slice(0, 16).replace('T', ' ');
-        padded.push(byMinute.get(label) || { minute: label, avg_ped: 0, avg_veh: 0, go: 0, stop: 0, off: 0 });
+      for (let i=9;i>=0;i--){
+        const d = new Date(now - i*60000);
+        const label = d.toISOString().slice(0,16).replace('T',' ');
+        padded.push(byMinute.get(label) || {minute: label, avg_ped:0, avg_veh:0, go:0, stop:0, off:0});
       }
-
       const labels = padded.map(r => r.minute.slice(11));
       const ped = padded.map(r => r.avg_ped);
       const veh = padded.map(r => r.avg_veh);
       const go = padded.map(r => r.go);
-      const stop = padded.map(r => r.stop);
+      const stop= padded.map(r => r.stop);
       const off = padded.map(r => r.off);
-
-      if (!densityChart) {
+      if (!densityChart){
         densityChart = new Chart(document.getElementById('densityChart'), {
           type: 'bar',
           data: {
@@ -268,8 +339,7 @@
         densityChart.data.datasets[1].data = veh;
         densityChart.update();
       }
-
-      if (!decisionChart) {
+      if (!decisionChart){
         decisionChart = new Chart(document.getElementById('decisionChart'), {
           type: 'line',
           data: {
@@ -289,62 +359,87 @@
         decisionChart.data.datasets[2].data = off;
         decisionChart.update();
       }
+    } catch (e) { console.error("Analytics load failed:", e); }
+  }
+
+  // ========= ARCHIVE (descending + manage) =========
+  function toggleSelectAll(cb){
+    document.querySelectorAll("#logs tbody input[type=checkbox]").forEach(x => x.checked = cb.checked);
+  }
+
+  async function deleteSelected(){
+    const ids = Array.from(document.querySelectorAll("#logs tbody input[type=checkbox]:checked"))
+      .map(cb => Number(cb.dataset.id));
+    if (!ids.length) { alert("Select at least one row."); return; }
+    if (!confirm(`Delete ${ids.length} selected row(s)?`)) return;
+    await fetch(BASE_URL + "/api/logs/delete", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ids})
+    });
+    await loadArchive();
+  }
+
+  async function clearAll(){
+    if (!confirm("Delete ALL log rows?")) return;
+    await fetch(BASE_URL + "/api/logs/clear", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({all:true})
+    });
+    await loadArchive();
+  }
+
+  async function loadArchive(limit=200){
+    try {
+      const res = await fetch(BASE_URL + "/api/logs?limit=" + encodeURIComponent(limit));
+      const rows = await res.json();
+      const tbody = document.querySelector("#logs tbody");
+      if (!tbody) return;
+      tbody.innerHTML = "";
+      rows.forEach(r => {
+        const tr = document.createElement("tr");
+        const t = new Date(r.ts * 1000).toLocaleTimeString();
+        tr.innerHTML = `
+          <td><input type="checkbox" data-id="${r.id}"></td>
+          <td>${t}</td>
+          <td>Ped: ${r.ped_count}, Veh: ${r.veh_count}, TL: ${(String(r.tl_color)||'').toUpperCase()}</td>
+          <td>Veh: ${r.board_veh||r.action} | Ped-L: ${r.board_ped_l||r.action} | Ped-R: ${r.board_ped_r||r.action}</td>`;
+        tbody.appendChild(tr);
+      });
+      const master = document.getElementById("selAll");
+      if (master) master.checked = false;
     } catch (e) {
-      console.error("Analytics load failed:", e);
+      console.error("Archive load failed:", e);
     }
   }
 
-  // ========== Socket.IO Real-time Updates ==========
+  // ========= Scenario toggle (calls backend) =========
+  async function toggleScenario(checkbox) {
+    const statusText = checkbox.closest('.scenario-header').querySelector('.status-text');
+    const active = checkbox.checked;
+    statusText.textContent = active ? "Active" : "Offline";
+    statusText.classList.toggle("active", active);
+    statusText.classList.toggle("offline", !active);
 
-  let socket = null;
-  try {
-    socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
-    socket.on("status", renderStatus);
-  } catch (e) { console.warn("Socket init failed:", e); }
+    const title = checkbox.closest('.scenario-card').querySelector('h3')?.textContent.trim().toLowerCase();
+    let payload = {};
+    if (title.includes("vehicle priority")) {
+      payload = { scenario: active ? "scenario_2_rush_hold" : "baseline", board_veh: active ? "ON" : "OFF" };
+    } else if (title.includes("pedestrian priority")) {
+      payload = { scenario: active ? "scenario_1_night_ped" : "baseline", board_ped_l: active ? "ON" : "OFF", board_ped_r: active ? "ON" : "OFF" };
+    } else if (title.includes("emergency")) {
+      payload = { scenario: active ? "scenario_3_emergency" : "baseline", board_veh: active ? "ON" : "OFF", board_ped_l: "OFF", board_ped_r: "OFF" };
+    }
 
-  // ========== Status Render Function ==========
-
-  function renderStatus(s) {
-    // Update live data (pedestrian count, vehicle count, etc.)
-    sysDecision.textContent = `${s.action}${s.scenario ? " (" + s.scenario + ")" : ""}`;
-    const nearest = (s.nearest_vehicle_distance_m ?? s.nearest_m ?? 0);
-    const avg_mps = (s.avg_vehicle_speed_mps ?? s.avg_mps ?? 0);
-
-    sysLine.innerHTML =
-      `TL: ${(s.tl_color || '').toUpperCase()} | 🧍 ${s.ped_count} | 🚗 ${s.veh_count} | ` +
-      `Nearest: ${Number(nearest).toFixed(1)} m | ` +
-      `Speed: ${Number(avg_mps).toFixed(1)} m/s (` +
-      `${(Number(avg_mps) * 3.6).toFixed(0)} km/h)`;
-
-    const titleMap = {
-      scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
-      scenario_1_night_ped: "Pedestrians Priority",
-      scenario_3_emergency: "Emergency Vehicle Detected",
-      baseline: "Baseline"
-    };
-    const scenKey = s.scenario || "baseline";
-    scenarioTitle.textContent = titleMap[scenKey] || scenKey;
-
-    // Scenario pills (Active for current scenario)
-    function pill(el, on) { el.classList.toggle("active", on); el.classList.toggle("offline", !on); }
-    pill(pillVeh, scenKey === "scenario_2_rush_hold");
-    pill(pillPed, scenKey === "scenario_1_night_ped");
-    pill(pillEmg, scenKey === "scenario_3_emergency");
-
-    // Light badge
-    lightBadge.className = 'light ' + (s.tl_color || '');
-    lightBadge.textContent = (s.tl_color || '').toUpperCase();
-
-    // Update scenario message
-    const scenTextMap = {
-      scenario_1_night_ped: "Prepare to Stop – Pedestrians Crossing",
-      scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
-      scenario_3_emergency: "Emergency Vehicle Passing – Please Wait",
-      baseline: (s.action === "GO" ? "Safe to Cross" : (s.action === "STOP" ? "Stop" : "Standby"))
-    };
-    scenarioMessage2.textContent = scenTextMap[scenKey];
+    try {
+      await fetch(BASE_URL + "/api/set_scenario", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+    } catch(e) { console.error("Failed to set scenario:", e); }
   }
-
 </script>
 </body>
 </html>
