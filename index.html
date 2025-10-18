@@ -9,8 +9,7 @@
 </head>
 <body>
 <div class="page-wrapper">
-
-  <!-- LOGIN PAGE (unchanged) -->
+  <!-- ================= LOGIN PAGE ================= -->
   <div id="loginPage" class="login-body" style="display:flex;">
     <div class="login-container">
       <h2>AI-Driven LED Board System</h2>
@@ -21,8 +20,9 @@
     </div>
   </div>
 
-  <!-- DASHBOARD PAGE -->
+  <!-- ================= DASHBOARD PAGE ================= -->
   <div id="dashboardPage" style="display:none;">
+    <!-- Navbar -->
     <header>
       <div class="header-container">
         <div class="logo"><img src="images/Adamson.png" alt="Logo"></div>
@@ -37,17 +37,21 @@
       </div>
     </header>
 
+    <!-- Dashboard -->
     <section id="dashboard" class="container active">
       <h2>📡 Live Monitoring — Adamson University San Marcelino St.</h2>
+
       <div class="grid-dashboard">
         <div class="card">
           <h3>Pedestrian Camera</h3>
           <div class="camera-feed"><img id="camPed" alt="Pedestrian Camera" loading="eager"></div>
         </div>
+
         <div class="card">
           <h3>Vehicle Camera</h3>
           <div class="camera-feed"><img id="camVeh" alt="Vehicle Camera" loading="eager"></div>
         </div>
+
         <div class="card">
           <h3>Traffic Light Detector</h3>
           <div class="camera-feed"><img id="camTL" alt="Traffic Light Camera" loading="eager"></div>
@@ -55,12 +59,14 @@
       </div>
 
       <div class="grid-2" style="margin-top:1rem;">
+        <!-- System Status -->
         <div class="card status" id="systemCard">
           <p><strong>System Status:</strong> <span id="sysOnline" class="status-text offline">OFFLINE</span></p>
           <p><strong>Current Decision:</strong> <span id="sysDecision">—</span></p>
           <p id="sysLine">TL: — | 🧍 0 | 🚗 0 | Nearest: 0.0 m | Speed: 0.0 m/s (0 km/h)</p>
         </div>
 
+        <!-- Scenario summary (no LED labels) -->
         <div class="card">
           <h3>Boards & Scenario</h3>
           <p>Scenario: <strong id="scenarioTitle">—</strong></p>
@@ -74,6 +80,7 @@
       </div>
     </section>
 
+    <!-- Analytics -->
     <section id="analytics" class="container">
       <h2>📊 Analytics</h2>
       <div class="grid-2">
@@ -88,6 +95,7 @@
       </div>
     </section>
 
+    <!-- Scenarios -->
     <section id="scenarios" class="container">
       <h2>🚦 Scenarios</h2>
       <p><strong>LED Board:</strong> <span id="scenarioMessage2">—</span></p>
@@ -143,12 +151,15 @@
       </div>
     </section>
 
+    <!-- Logs -->
     <section id="logs" class="container">
       <h2>🗂️ System Logs</h2>
+
       <div style="margin: 0 0 .75rem 0; display:flex; gap:.5rem;">
         <button onclick="deleteSelected()" class="logout-btn" style="background:#0a7;">Delete Selected</button>
         <button onclick="clearAll()" class="logout-btn" style="background:#a00;">Clear All</button>
       </div>
+
       <div class="table-scroll">
         <table>
           <thead>
@@ -164,47 +175,25 @@
       </div>
     </section>
 
+    <!-- Footer -->
     <footer>
       <p>© 2025 Adamson University | AI-Driven LED Board Optimization</p>
     </footer>
-  </div>
-</div>
 
-<!-- JS -->
+  </div> <!-- /dashboardPage -->
+
+</div> <!-- /page-wrapper -->
+
+<!-- ================= JAVASCRIPT ================= -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
   const BASE_URL = window.location.origin;
 
-  // ========= LOGIN =========
-  function doLogin(){
-    const u = user.value.trim(), p = pass.value.trim();
-    if (!u || !p) { alert("Enter any username & password"); return; }
-    localStorage.setItem("loggedInUser", u);
-    showDashboard();
-  }
-  function logout(){
-    localStorage.removeItem("loggedInUser");
-    localStorage.removeItem("activeTab");
-    showLogin();
-  }
-  function showDashboard(){
-    loginPage.style.display = "none";
-    dashboardPage.style.display = "block";
-    setCamSrcs();
-    openTab(localStorage.getItem("activeTab") || "dashboard");
-  }
-  function showLogin(){
-    loginPage.style.display = "flex";
-    dashboardPage.style.display = "none";
-  }
-  window.addEventListener("load", () => {
-    if (localStorage.getItem("loggedInUser")) showDashboard();
-    else showLogin();
-  });
+  // ========== Real-time Analytics Update ==========
 
-  // ========= TABS =========
-  let densityChart, decisionChart, analyticsTimer=null, logsTimer=null;
+  let densityChart, decisionChart, analyticsTimer = null, logsTimer = null;
+  
   function openTab(tabId) {
     document.querySelectorAll('.container').forEach(s => s.classList.remove('active'));
     document.getElementById(tabId)?.classList.add('active');
@@ -216,47 +205,116 @@
     localStorage.setItem("activeTab", tabId);
 
     if (tabId === "analytics") {
-      loadAnalytics(); // initial load
+      loadAnalytics();
       if (!analyticsTimer) analyticsTimer = setInterval(loadAnalytics, 60000);
-    } else { if (analyticsTimer) { clearInterval(analyticsTimer); analyticsTimer = null; } }
+    } else { 
+      if (analyticsTimer) { clearInterval(analyticsTimer); analyticsTimer = null; } 
+    }
 
     if (tabId === "logs") {
       loadArchive();
       if (!logsTimer) logsTimer = setInterval(loadArchive, 30000);
-    } else { if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } }
+    } else { 
+      if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } 
+    }
   }
 
-  // ========= CAMERA STREAMS =========
+  // ========== Camera Stream Fix ==========
+
   function setCamSrcs() {
     camPed.src = BASE_URL + "/stream/ped";
     camVeh.src = BASE_URL + "/stream/veh";
     camTL.src  = BASE_URL + "/stream/tl";
   }
 
-  // ========= ONLINE/OFFLINE via Socket.IO + poll fallback =========
-  let lastStatusTs = 0;
-  const ONLINE_TIMEOUT_MS = 5000;
+  // ========== Real-time Analytics Update ==========
 
-  function setSysOnline(online){
-    const el = document.getElementById("sysOnline");
-    el.textContent = online ? "ONLINE" : "OFFLINE";
-    el.classList.toggle("active", online);
-    el.classList.toggle("offline", !online);
+  async function loadAnalytics() {
+    try {
+      const res = await fetch(BASE_URL + "/api/analytics");
+      const rows = await res.json();
+
+      const now = Date.now();
+      const byMinute = new Map(rows.map(r => [r.minute, r]));
+      const padded = [];
+      for (let i = 9; i >= 0; i--) {
+        const d = new Date(now - i * 60000);
+        const label = d.toISOString().slice(0, 16).replace('T', ' ');
+        padded.push(byMinute.get(label) || { minute: label, avg_ped: 0, avg_veh: 0, go: 0, stop: 0, off: 0 });
+      }
+
+      const labels = padded.map(r => r.minute.slice(11));
+      const ped = padded.map(r => r.avg_ped);
+      const veh = padded.map(r => r.avg_veh);
+      const go = padded.map(r => r.go);
+      const stop = padded.map(r => r.stop);
+      const off = padded.map(r => r.off);
+
+      if (!densityChart) {
+        densityChart = new Chart(document.getElementById('densityChart'), {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              { label: 'Avg Pedestrians', data: ped },
+              { label: 'Avg Vehicles', data: veh }
+            ]
+          },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      } else {
+        densityChart.data.labels = labels;
+        densityChart.data.datasets[0].data = ped;
+        densityChart.data.datasets[1].data = veh;
+        densityChart.update();
+      }
+
+      if (!decisionChart) {
+        decisionChart = new Chart(document.getElementById('decisionChart'), {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              { label: 'GO', data: go },
+              { label: 'STOP', data: stop },
+              { label: 'OFF', data: off }
+            ]
+          },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      } else {
+        decisionChart.data.labels = labels;
+        decisionChart.data.datasets[0].data = go;
+        decisionChart.data.datasets[1].data = stop;
+        decisionChart.data.datasets[2].data = off;
+        decisionChart.update();
+      }
+    } catch (e) {
+      console.error("Analytics load failed:", e);
+    }
   }
-  setInterval(()=>{ setSysOnline(Date.now() - lastStatusTs < ONLINE_TIMEOUT_MS); }, 1000);
 
-  function renderStatus(s){
-    lastStatusTs = Date.now();
-    sysDecision.textContent = `${s.action}${s.scenario ? " ("+s.scenario+")" : ""}`;
+  // ========== Socket.IO Real-time Updates ==========
 
+  let socket = null;
+  try {
+    socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
+    socket.on("status", renderStatus);
+  } catch (e) { console.warn("Socket init failed:", e); }
+
+  // ========== Status Render Function ==========
+
+  function renderStatus(s) {
+    // Update live data (pedestrian count, vehicle count, etc.)
+    sysDecision.textContent = `${s.action}${s.scenario ? " (" + s.scenario + ")" : ""}`;
     const nearest = (s.nearest_vehicle_distance_m ?? s.nearest_m ?? 0);
     const avg_mps = (s.avg_vehicle_speed_mps ?? s.avg_mps ?? 0);
 
     sysLine.innerHTML =
-      `TL: ${(s.tl_color||'').toUpperCase()} | 🧍 ${s.ped_count} | 🚗 ${s.veh_count} | `+
-      `Nearest: ${Number(nearest).toFixed(1)} m | `+
-      `Speed: ${Number(avg_mps).toFixed(1)} m/s (`+
-      `${(Number(avg_mps)*3.6).toFixed(0)} km/h)`;
+      `TL: ${(s.tl_color || '').toUpperCase()} | 🧍 ${s.ped_count} | 🚗 ${s.veh_count} | ` +
+      `Nearest: ${Number(nearest).toFixed(1)} m | ` +
+      `Speed: ${Number(avg_mps).toFixed(1)} m/s (` +
+      `${(Number(avg_mps) * 3.6).toFixed(0)} km/h)`;
 
     const titleMap = {
       scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
@@ -267,14 +325,17 @@
     const scenKey = s.scenario || "baseline";
     scenarioTitle.textContent = titleMap[scenKey] || scenKey;
 
-    function pill(el, on){ el.classList.toggle("active", on); el.classList.toggle("offline", !on); }
+    // Scenario pills (Active for current scenario)
+    function pill(el, on) { el.classList.toggle("active", on); el.classList.toggle("offline", !on); }
     pill(pillVeh, scenKey === "scenario_2_rush_hold");
     pill(pillPed, scenKey === "scenario_1_night_ped");
     pill(pillEmg, scenKey === "scenario_3_emergency");
 
-    lightBadge.className = 'light ' + (s.tl_color||'');
-    lightBadge.textContent = (s.tl_color||'').toUpperCase();
+    // Light badge
+    lightBadge.className = 'light ' + (s.tl_color || '');
+    lightBadge.textContent = (s.tl_color || '').toUpperCase();
 
+    // Update scenario message
     const scenTextMap = {
       scenario_1_night_ped: "Prepare to Stop – Pedestrians Crossing",
       scenario_2_rush_hold: "Vehicles Priority – Wait to Cross",
@@ -284,205 +345,6 @@
     scenarioMessage2.textContent = scenTextMap[scenKey];
   }
 
-  // ========= SOCKET.IO =========
-  let socket = null;
-  try {
-    socket = io(BASE_URL + "/realtime", { transports: ["websocket"] });
-    socket.on("status", renderStatus);
-
-    // NEW: real-time analytics push from server
-    socket.on("analytics", (rows) => {
-      updateAnalyticsCharts(rows);
-    });
-  } catch(e){ console.warn("Socket init failed:", e); }
-
-  // Poll fallback every 2s
-  setInterval(async ()=>{
-    try{
-      const r = await fetch(BASE_URL + "/api/status_now", {cache: "no-store"});
-      const s = await r.json();
-      renderStatus(s);
-    }catch(e){}
-  }, 2000);
-
-  // ========= ANALYTICS =========
-  function updateAnalyticsCharts(rows){
-    // pad to last 10 minutes for nice aligned x-axis
-    const now = Date.now();
-    const byMinute = new Map(rows.map(r => [r.minute, r]));
-    const padded = [];
-    for (let i=9;i>=0;i--){
-      const d = new Date(now - i*60000);
-      const label = d.toISOString().slice(0,16).replace('T',' ');
-      padded.push(byMinute.get(label) || {minute: label, avg_ped:0, avg_veh:0, go:0, stop:0, off:0});
-    }
-
-    const labels = padded.map(r => r.minute.slice(11));
-    const ped = padded.map(r => r.avg_ped);
-    const veh = padded.map(r => r.avg_veh);
-    const go  = padded.map(r => r.go);
-    const stop= padded.map(r => r.stop);
-    const off = padded.map(r => r.off);
-
-    const chartOpts = {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,           // no animation → no flicker
-      transitions: { active: { animation: false } },
-    };
-
-    if (!densityChart){
-      densityChart = new Chart(document.getElementById('densityChart'), {
-        type: 'bar',
-        data: { labels, datasets: [
-          { label: 'Avg Pedestrians', data: ped },
-          { label: 'Avg Vehicles', data: veh }
-        ]},
-        options: chartOpts
-      });
-    } else {
-      densityChart.data.labels = labels;
-      densityChart.data.datasets[0].data = ped;
-      densityChart.data.datasets[1].data = veh;
-      densityChart.update();
-    }
-
-    if (!decisionChart){
-      decisionChart = new Chart(document.getElementById('decisionChart'), {
-        type: 'line',
-        data: { labels, datasets: [
-          { label: 'GO', data: go },
-          { label: 'STOP', data: stop },
-          { label: 'OFF', data: off }
-        ]},
-        options: chartOpts
-      });
-    } else {
-      decisionChart.data.labels = labels;
-      decisionChart.data.datasets[0].data = go;
-      decisionChart.data.datasets[1].data = stop;
-      decisionChart.data.datasets[2].data = off;
-      decisionChart.update();
-    }
-  }
-
-async function loadAnalytics() {
-  try {
-    const res = await fetch(BASE_URL + "/api/analytics");
-    const rows = await res.json();
-
-    // Log the fetched rows to check the data
-    console.log("Fetched Analytics Data: ", rows);
-
-    const now = Date.now();
-    const byMinute = new Map(rows.map(r => [r.minute, r]));
-    const padded = [];
-    for (let i = 9; i >= 0; i--) {
-      const d = new Date(now - i * 60000);
-      const label = d.toISOString().slice(0, 16).replace('T', ' ');
-      padded.push(byMinute.get(label) || {minute: label, avg_ped: 0, avg_veh: 0, go: 0, stop: 0, off: 0});
-    }
-
-    const labels = padded.map(r => r.minute.slice(11));
-    const ped = padded.map(r => r.avg_ped);
-    const veh = padded.map(r => r.avg_veh);
-    const go = padded.map(r => r.go);
-    const stop = padded.map(r => r.stop);
-    const off = padded.map(r => r.off);
-
-    // Check the data that will be used for the graph
-    console.log("Prepared Graph Data: ", {labels, ped, veh, go, stop, off});
-
-    // Update the density chart
-    if (!densityChart) {
-      densityChart = new Chart(document.getElementById('densityChart'), {
-        type: 'bar',
-        data: {
-          labels: labels,
-          datasets: [
-            { label: 'Avg Pedestrians', data: ped, backgroundColor: 'rgba(0, 255, 0, 0.5)' },
-            { label: 'Avg Vehicles', data: veh, backgroundColor: 'rgba(0, 0, 255, 0.5)' }
-          ]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false
-        }
-      });
-    } else {
-      densityChart.data.labels = labels;
-      densityChart.data.datasets[0].data = ped;
-      densityChart.data.datasets[1].data = veh;
-      densityChart.update();
-    }
-
-    // Update the decision chart
-    if (!decisionChart) {
-      decisionChart = new Chart(document.getElementById('decisionChart'), {
-        type: 'line',
-        data: {
-          labels: labels,
-          datasets: [
-            { label: 'GO', data: go, borderColor: 'green', fill: false },
-            { label: 'STOP', data: stop, borderColor: 'red', fill: false },
-            { label: 'OFF', data: off, borderColor: 'gray', fill: false }
-          ]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false
-        }
-      });
-    } else {
-      decisionChart.data.labels = labels;
-      decisionChart.data.datasets[0].data = go;
-      decisionChart.data.datasets[1].data = stop;
-      decisionChart.data.datasets[2].data = off;
-      decisionChart.update();
-    }
-
-  } catch (e) {
-    console.error("Analytics load failed:", e);
-  }
-}
-
-}
-
-  // ========= Scenario toggle (unchanged) =========
-  async function toggleScenario(checkbox) {
-    const statusText = checkbox.closest('.scenario-header').querySelector('.status-text');
-    const active = checkbox.checked;
-    statusText.textContent = active ? "Active" : "Offline";
-    statusText.classList.toggle("active", active);
-    statusText.classList.toggle("offline", !active);
-
-    const title = checkbox.closest('.scenario-card').querySelector('h3')?.textContent.trim().toLowerCase();
-
-    let payload = {};
-    if (title.includes("vehicle priority")) {
-      payload = { scenario: active ? "scenario_2_rush_hold" : "baseline",
-                  board_veh: active ? "ON" : "OFF" };
-    } else if (title.includes("pedestrian priority")) {
-      payload = { scenario: active ? "scenario_1_night_ped" : "baseline",
-                  board_ped_l: active ? "ON" : "OFF",
-                  board_ped_r: active ? "ON" : "OFF" };
-    } else if (title.includes("emergency")) {
-      payload = { scenario: active ? "scenario_3_emergency" : "baseline",
-                  board_veh: active ? "ON" : "OFF",
-                  board_ped_l: "OFF",
-                  board_ped_r: "OFF" };
-    }
-
-    try {
-      await fetch(BASE_URL + "/api/set_scenario", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-      });
-    } catch(e) {
-      console.error("Failed to set scenario:", e);
-    }
-  }
 </script>
 </body>
 </html>
